@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Vec3 } from "@/lib/types";
+import type { Lane, Vec3 } from "@/lib/types";
 
 interface CameraState {
   position: Vec3;
@@ -73,6 +73,10 @@ interface UIState {
   /** Pipeline drill-down drawer — null when closed. */
   openStage: DrillStage | null;
   setOpenStage: (stage: DrillStage | null) => void;
+  /** Active labeling lane — controls which annotations.*.json the viewer
+   *  reads. "b" is the default VLM-verified labels lane. */
+  lane: Lane;
+  setLane: (lane: Lane) => void;
   setSelected: (id: string | null) => void;
   toggleIsolated: (id: string) => void;
   clearIsolated: () => void;
@@ -112,6 +116,8 @@ export const useUI = create<UIState>((set) => ({
   displayScale: 1,
   openStage: null,
   setOpenStage: (openStage) => set({ openStage }),
+  lane: "b",
+  setLane: (lane) => set({ lane }),
   setSelected: (id) => set({ selectedId: id }),
   toggleIsolated: (id) =>
     set((s) => {

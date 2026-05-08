@@ -1,25 +1,20 @@
-"""Modal scaffold: segmentation container for spatiality_v2.
+"""Modal container: SAM 3.1 + lifting + 3 labeling lanes (B/E/F).
 
-Template only — segmentation model, dependencies, and the actual logic are
-deliberately left as TODOs. Fill them in once the model is picked.
+Stage 2+ of the pipeline. Reads geometry artefacts from Stage 1 (points.ply,
+cameras.json, depth/, depth_conf/, frames/) and runs:
 
-Kept separate from ``inference.py`` so the segmentation image (typically heavy:
-torch + vision encoder + checkpoints) only spins up when needed, and the two
-paths can scale independently.
+    - SAM 3.1 detection + video tracker (Object Multiplex)
+    - 3D pinning per track (confidence-gated unprojection + median centroid)
+    - Lane B  : VLM-verified labels via orbital novel-view renders + Claude
+    - Lane E  : ConceptGraphs-style scene graph (objects + relations)
+    - Lane F  : SpatialLM layout (walls, doors, windows)
 
-Setup (one-time)
-----------------
-1. ``pip install modal`` (or ``uv pip install modal``)
-2. ``modal token set``
-3. Volumes auto-create on first ``modal run``; or pre-create explicitly:
-       modal volume create spatiality-inputs
-       modal volume create spatiality-outputs
-4. If the model is gated on Hugging Face, drop ``HF_TOKEN=hf_...`` into ``.env``
-   — it'll be picked up by the secret below.
+Outputs three independent annotations.json variants (annotations.b.json,
+annotations.e.json, annotations.f.json) that the web UI can switch between.
 
-Running
--------
-    modal run modal_segmentation.py::main --input-id <id>
+Requires the ``HF_TOKEN`` and ``ANTHROPIC_API_KEY`` env vars (from .env).
+
+Run: ``modal run modal_segmentation.py::main --input-id <id>``
 """
 
 from __future__ import annotations
@@ -40,30 +35,53 @@ OUTPUTS_VOLUME = "spatiality-outputs"
 
 # ---------------------------------------------------------------------------- image
 
-# TODO: pin the segmentation-model dependencies here once chosen.
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install(
+        "git",
         "libgl1",
         "libglib2.0-0",
         "libsm6",
         "libxext6",
+        "ffmpeg",
     )
     .pip_install(
-        "numpy",
+        "numpy>=1.24,<2",
         "Pillow",
-        # TODO: torch / torchvision / transformers / model checkpoints
+        "opencv-python-headless",
+        "scipy",
+        "scikit-learn",
+        "huggingface_hub[hf_transfer]",
+        "torch==2.4.0",
+        "torchvision==0.19.0",
+        "transformers>=4.45",
+        "plyfile",
+        "trimesh",
+        "tqdm",
+        # Lanes B + E use PydanticAI with Gemini 2.5 Flash / Flash-Lite for
+        # structured-output VLM calls. The `[google]` extra pulls the
+        # google-genai client. Auth via GEMINI_API_KEY in .env.
+        "pydantic-ai-slim[google]>=0.0.20",
+        # Open-vocab SigLIP for cross-frame stitching (matches
+        # ConceptGraphs-style merge_visual_sim_thresh=0.8 semantics).
+        "open_clip_torch",
     )
+    # SAM 3.1 (Object Multiplex, 7× speedup at 128 objects on H100).
+    # Drop-in over SAM 3 — same predictor classes, new weights via HF.
+    .pip_install("git+https://github.com/facebookresearch/sam3.git@main")
+    # SpatialLM (NeurIPS'25) for Lane F layout (walls/doors/windows).
+    .pip_install("git+https://github.com/manycore-research/SpatialLM.git@main")
+    # Point-cloud rendering for orbital novel views in Lane B.
+    .pip_install("open3d>=0.18", "pyrender>=0.1.45")
     .env(
         {
             "PYTHONPATH": "/root/src",
             "SPATIALITY_DATA_ROOT": "/inputs",
             "SPATIALITY_ARTEFACTS_ROOT": "/outputs",
-            # Faster HF downloads on cold start (no-op if hf_transfer not installed).
             "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "PYOPENGL_PLATFORM": "egl",  # offscreen render for orbital views
         }
     )
-    # Mount last so code edits don't bust the image cache.
     .add_local_dir(str(SRC_DIR), remote_path="/root/src")
 )
 
@@ -82,11 +100,13 @@ secret = (
 
 app = modal.App("spatiality-segmentation")
 
-# TODO: revisit once the model + batch size is known.
-GPU_KIND = "A10G"
+# A100-80GB headroom for SAM 3.1 (Object Multiplex on long clips) + SpatialLM
+# inference + concurrent VLM I/O. SAM 3.1 reports best on H100/H200; A100 is
+# the practical Modal default and still much faster than SAM 3.
+GPU_KIND = "A100-80GB"
 GPU_CPU = 8
-GPU_MEMORY_MB = 32 * 1024
-TIMEOUT = 60 * 60
+GPU_MEMORY_MB = 64 * 1024
+TIMEOUT = 60 * 90
 
 _FN_KW = dict(
     image=image,
@@ -104,7 +124,7 @@ _FN_KW = dict(
 
 @app.function(**_FN_KW)
 def run_segmentation_one(input_id: str, **kwargs) -> dict:
-    """Run segmentation on a single input. Delegates to ``spatiality.segmentation.run``."""
+    """Run the full segmentation + 3-lane labeling pipeline on a single input."""
     inputs_vol.reload()
     outputs_vol.reload()
 
@@ -120,13 +140,12 @@ def run_segmentation_one(input_id: str, **kwargs) -> dict:
 
 
 @app.local_entrypoint()
-def main(input_id: str = "", all: bool = False) -> None:
+def main(input_id: str = "", all: bool = False, **kwargs) -> None:
     """``modal run modal_segmentation.py::main --input-id <id>`` or ``--all``."""
     if all:
-        # TODO: enumerate inputs and fan out via .spawn().
         raise SystemExit("--all not implemented yet; pass --input-id <id>")
     if not input_id:
         raise SystemExit("usage: modal run modal_segmentation.py::main --input-id <id>")
 
-    result = run_segmentation_one.remote(input_id)
+    result = run_segmentation_one.remote(input_id, **kwargs)
     print(result)

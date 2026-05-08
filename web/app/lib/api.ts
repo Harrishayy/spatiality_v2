@@ -4,6 +4,8 @@ import type {
   CostAggregate,
   GatewayHealth,
   JobSettings,
+  Lane,
+  LanePayload,
   Manifest,
   TraceResponse,
 } from "./types";
@@ -38,9 +40,53 @@ export async function fetchManifest(sceneId: string): Promise<Manifest> {
   return unwrap(res, "fetchManifest");
 }
 
-export async function fetchAnnotations(sceneId: string): Promise<Annotation[]> {
-  const res = await fetch(getArtifactUrl(sceneId, "annotations.json"));
-  return unwrap(res, "fetchAnnotations");
+/** Lane → artifact filename. Lane B is the default (it's the VLM-verified
+ *  labels everyone falls back to); the legacy "annotations.json" path is
+ *  kept as the absolute fallback for old scenes. */
+function laneArtifact(lane?: Lane): string {
+  switch (lane) {
+    case "b":
+      return "annotations.b.json";
+    case "e":
+      return "annotations.e.json";
+    case "f":
+      return "annotations.f.json";
+    default:
+      return "annotations.json";
+  }
+}
+
+/** Normalise the per-lane payload — Lane B is a bare Annotation[], Lanes E
+ *  and F wrap it in `{annotations, edges?, layout?}`. */
+export async function fetchLanePayload(
+  sceneId: string,
+  lane?: Lane,
+): Promise<LanePayload> {
+  let res = await fetch(getArtifactUrl(sceneId, laneArtifact(lane)));
+  // Fall back to the legacy filename if the lane file isn't present (e.g.
+  // an older scene was rendered before the lane refactor).
+  if (!res.ok && lane && lane !== "b") {
+    res = await fetch(getArtifactUrl(sceneId, "annotations.json"));
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `fetchLanePayload: ${res.status}` }));
+    throw new Error(err.error ?? `fetchLanePayload: ${res.status}`);
+  }
+  const body = await res.json();
+  if (Array.isArray(body)) return { annotations: body };
+  return {
+    annotations: body.annotations ?? [],
+    edges: body.edges,
+    layout: body.layout,
+  };
+}
+
+export async function fetchAnnotations(
+  sceneId: string,
+  lane?: Lane,
+): Promise<Annotation[]> {
+  const payload = await fetchLanePayload(sceneId, lane);
+  return payload.annotations;
 }
 
 export async function fetchPointsUrl(sceneId: string): Promise<string> {

@@ -1,15 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchAnnotations, fetchManifest, fetchPointsUrl } from "@/lib/api";
-import type { Annotation, BBox, Vec3 } from "@/lib/types";
+import { fetchLanePayload, fetchManifest, fetchPointsUrl } from "@/lib/api";
+import { useUI } from "@/store/ui";
+import type { Annotation, BBox, LanePayload, Lane, SceneEdge, SpatialLayout, Vec3 } from "@/lib/types";
 
 const POLL_MS = 2000;
 
 // VGGT outputs OpenCV-convention world coords (+Y down, +Z forward). The
 // SplatViewer parser flips Y and Z on every point so the cloud renders
 // right-side-up in Three.js (+Y up, +Z toward camera). Annotation centroids
-// and bboxes are produced in the same world frame upstream, so they need
-// the same flip — otherwise labels would float above/behind the wrong
-// objects.
+// and bboxes — and now Lane E edges and Lane F walls / doors / windows —
+// are produced in the same world frame upstream, so they need the same flip.
 function flipPoint(p: Vec3): Vec3 {
   return [p[0], -p[1], -p[2]];
 }
@@ -24,14 +24,31 @@ function flipBBox(b: BBox): BBox {
 function flipAnnotation(a: Annotation): Annotation {
   return { ...a, centroid: flipPoint(a.centroid), bbox: flipBBox(a.bbox) };
 }
+function flipLayout(layout: SpatialLayout): SpatialLayout {
+  return {
+    walls: layout.walls.map((w) => ({
+      a: flipPoint(w.a),
+      b: flipPoint(w.b),
+      height: w.height,
+    })),
+    doors: layout.doors.map((d) => ({ center: flipPoint(d.center), extent: d.extent })),
+    windows: layout.windows.map((w) => ({ center: flipPoint(w.center), extent: w.extent })),
+  };
+}
+function flipPayload(payload: LanePayload): LanePayload {
+  return {
+    annotations: payload.annotations.map(flipAnnotation),
+    edges: payload.edges,
+    layout: payload.layout ? flipLayout(payload.layout) : undefined,
+  };
+}
 
 export function useScene(sceneId: string) {
+  const lane: Lane = useUI((s) => s.lane);
+
   const manifest = useQuery({
     queryKey: ["manifest", sceneId],
     queryFn: () => fetchManifest(sceneId),
-    // Poll until both top-level pipeline AND segmentation reach a terminal
-    // state. We can't stop on status="ready" alone — segmentation may still
-    // be running in the background after splat completes.
     refetchInterval: (q) => {
       const m = q.state.data;
       if (!m) return POLL_MS;
@@ -46,11 +63,26 @@ export function useScene(sceneId: string) {
   const splatReady = manifest.data?.stages.splat.status === "complete";
   const segReady = manifest.data?.stages.segmentation.status === "complete";
 
-  const annotations = useQuery({
-    queryKey: ["annotations", sceneId],
-    queryFn: async () => (await fetchAnnotations(sceneId)).map(flipAnnotation),
+  // Lane is part of the cache key so switching lanes triggers a refetch.
+  // The fetcher applies the y/z flip once; downstream consumers see the
+  // viewer-frame payload directly.
+  const lanePayload = useQuery({
+    queryKey: ["lane-payload", sceneId, lane],
+    queryFn: async () => flipPayload(await fetchLanePayload(sceneId, lane)),
     enabled: segReady,
   });
+
+  // Same cache entry, surfaced via `select` so the existing `annotations.data`
+  // call sites still work and we don't fake-cast a UseQueryResult shape.
+  const annotations = useQuery({
+    queryKey: ["lane-payload", sceneId, lane],
+    queryFn: async () => flipPayload(await fetchLanePayload(sceneId, lane)),
+    enabled: segReady,
+    select: (p: LanePayload): Annotation[] => p.annotations,
+  });
+
+  const edges: SceneEdge[] | undefined = lanePayload.data?.edges;
+  const layout: SpatialLayout | undefined = lanePayload.data?.layout;
 
   const splatUrl = useQuery({
     queryKey: ["splatUrl", sceneId],
@@ -58,8 +90,15 @@ export function useScene(sceneId: string) {
     enabled: splatReady,
   });
 
-  // Backward-compat: `ready` used to mean "everything ready". Keep it as the
-  // narrower "splat is renderable" signal — that's what its only consumer
-  // (the page) actually needed.
-  return { manifest, annotations, splatUrl, splatReady, segReady, ready: splatReady };
+  return {
+    manifest,
+    annotations,
+    edges,
+    layout,
+    splatUrl,
+    splatReady,
+    segReady,
+    ready: splatReady,
+    lane,
+  };
 }

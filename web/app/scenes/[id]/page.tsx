@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import { Header } from "@/components/Header";
+import { LaneSwitcher } from "@/components/LaneSwitcher";
 import { PipelineProgress } from "@/components/PipelineProgress";
 import {
   SceneDrawerOverlay,
@@ -69,6 +70,12 @@ export default function ScenePage() {
             />
           ) : (
             <PipelinePending manifest={m} failed={failed} />
+          )}
+
+          {segReady && (
+            <div className="pointer-events-auto absolute left-3 top-3 z-20">
+              <LaneSwitcher />
+            </div>
           )}
 
           {splatReady && !segReady && segStatus !== "failed" && (

@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+next-env.d.ts
+tsconfig.tsbuildinfo
+*.local
+.DS_Store
+
+# Generated scene artifacts served by Next.js — large binaries, regenerate per scene.
+public/artifacts/

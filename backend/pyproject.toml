@@ -1,0 +1,15 @@
+[project]
+name = "spatiality"
+version = "0.0.0"
+description = "Spatiality v2 backend — inference + segmentation pipelines."
+requires-python = ">=3.12"
+# Runtime deps live in the Modal images (modal_inference.py / modal_segmentation.py).
+# Add anything that should run *locally* here once we have it.
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spatiality"]

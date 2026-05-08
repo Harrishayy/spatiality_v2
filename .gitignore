@@ -159,6 +159,7 @@ colmap_workspace/
 *.bag
 !examples/**/*.ply
 !docs/**/*.ply
+!web/public/demo/*.ply
 
 # COLMAP / SfM intermediates
 database.db

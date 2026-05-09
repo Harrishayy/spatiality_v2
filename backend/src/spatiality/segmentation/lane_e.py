@@ -110,6 +110,7 @@ def run_lane_e(
     confidence_threshold: float = 0.5,
 ) -> dict:
     """Produce per-pair relation edges, layered over Lane B's annotations."""
+    import time as _time
     points_path = out_dir / "points.ply"
     topdown = _topdown_render(points_path)
 
@@ -119,11 +120,19 @@ def run_lane_e(
 
     edges: list[dict] = []
     n = len(lifted_tracks)
+    n_pairs_total = n * (n - 1)
+    n_evaluated = 0
+    n_calls = 0
+    print(f"[lane_e] {n} lifted tracks → up to {n_pairs_total} directed pairs "
+          f"(filter: dist≤{distance_threshold}m, both labelled, conf≥{confidence_threshold})", flush=True)
+    _t = _time.time()
+
     for i in range(n):
         ti = lifted_tracks[i]
         for j in range(n):
             if i == j:
                 continue
+            n_evaluated += 1
             tj = lifted_tracks[j]
             dist = float(np.linalg.norm(ti.centroid - tj.centroid))
             if dist > distance_threshold:
@@ -139,6 +148,8 @@ def run_lane_e(
             if tj.track_id not in closeups:
                 closeups[tj.track_id] = _track_closeup(points_path, tj)
 
+            n_calls += 1
+            _t_call = _time.time()
             try:
                 reply = call_vlm(
                     _PROMPT.format(label_a=label_a, label_b=label_b),
@@ -147,11 +158,17 @@ def run_lane_e(
                     model=vlm_model,
                 )
             except Exception as e:  # noqa: BLE001
+                print(f"[lane_e]   call {n_calls}: ({ti.track_id}->{tj.track_id}) "
+                      f"VLM FAILED: {e}", flush=True)
                 logger.warning("relation VLM failed for (%s,%s): %s",
                                ti.track_id, tj.track_id, e)
                 continue
 
-            if reply.relation == "none" or reply.confidence < confidence_threshold:
+            kept = reply.relation != "none" and reply.confidence >= confidence_threshold
+            print(f"[lane_e]   call {n_calls}: {label_a}({ti.track_id})→{label_b}({tj.track_id}) "
+                  f"= {reply.relation} conf={reply.confidence:.2f} "
+                  f"{'KEPT' if kept else 'dropped'} ({_time.time()-_t_call:.1f}s)", flush=True)
+            if not kept:
                 continue
 
             edges.append(
@@ -163,10 +180,14 @@ def run_lane_e(
                 }
             )
 
+    print(f"[lane_e] evaluated {n_evaluated} pairs, {n_calls} VLM calls, "
+          f"{len(edges)} kept edges ({_time.time()-_t:.1f}s)", flush=True)
+
     payload = {
         "annotations": lane_b_annotations,
         "edges": edges,
     }
     (out_dir / "annotations.e.json").write_text(json.dumps(payload, indent=2))
-    logger.info("Lane E wrote %d edges over %d annotations", len(edges), len(lane_b_annotations))
+    print(f"[lane_e] wrote annotations.e.json ({len(edges)} edges over "
+          f"{len(lane_b_annotations)} annotations)", flush=True)
     return payload

@@ -37,7 +37,7 @@ export default function UploadPage() {
   }
 
   return (
-    <div className="lp-home">
+    <div className="lp-home w-full max-w-[100vw] overflow-x-hidden">
       <header className="lp-home-header lp-home-header--row">
         <Link className="lp-home-brand" href="/">
           <span className="lp-home-brand-mark" aria-hidden="true" />
@@ -46,14 +46,16 @@ export default function UploadPage() {
       </header>
 
       <main className="mx-auto flex w-full max-w-6xl flex-col gap-12 px-10 pb-16 pt-4 max-md:px-5">
-        <div className="grid grid-cols-1 gap-8 md:grid-cols-[1.05fr_0.95fr]">
-          <Uploader
-            state={state}
-            onPick={(file) => start(file)}
-            onReset={reset}
-          />
+        <div className="grid w-full grid-cols-1 gap-8 md:grid-cols-[1.05fr_0.95fr]">
+          <div className="min-w-0">
+            <Uploader
+              state={state}
+              onPick={(file) => start(file)}
+              onReset={reset}
+            />
+          </div>
 
-          <div className="flex flex-col gap-5">
+          <div className="flex min-w-0 flex-col gap-5">
             <SettingsPanel
               value={settings}
               onChange={setSettings}

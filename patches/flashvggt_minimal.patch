@@ -1,0 +1,17 @@
+pyproject.toml | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+--- Changes ---
+
+pyproject.toml
+  @@ -29,9 +29,10 @@ dependencies = [
+  +namespaces = true
+   where = ["."]
+   exclude = [
+  -    "outputs*", 
+  +    "outputs*",
+       "ckpts*",
+   ]
+  -include = ["flashvggt", "flashvggt_stream"]
+  +include = ["flashvggt*", "flashvggt_stream*"]
+  +3 -2

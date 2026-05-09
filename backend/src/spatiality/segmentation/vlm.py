@@ -77,3 +77,31 @@ def call_vlm(
 
     result = agent.run_sync(parts)
     return result.output
+
+
+async def call_vlm_async(
+    prompt: str,
+    images: list[np.ndarray],
+    output_type: type[T],
+    model: str | None = None,
+    system_prompt: str | None = None,
+) -> T:
+    """Async variant of :func:`call_vlm` for concurrent fan-out via asyncio.gather.
+
+    Used by the scene-scout pass which fans out N parallel Gemini Flash calls,
+    one per temporal slice of the video. Building a fresh Agent per call is
+    fine — pydantic-ai Agents are cheap construction objects.
+    """
+    from pydantic_ai import Agent, BinaryContent  # noqa: PLC0415
+
+    agent_kwargs: dict = {"output_type": output_type}
+    if system_prompt:
+        agent_kwargs["system_prompt"] = system_prompt
+
+    agent = Agent(_resolve_model(model), **agent_kwargs)
+
+    parts: list = [BinaryContent(data=_png_bytes(im), media_type="image/png") for im in images]
+    parts.append(prompt)
+
+    result = await agent.run(parts)
+    return result.output

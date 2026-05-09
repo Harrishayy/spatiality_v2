@@ -129,13 +129,16 @@ def run_lane_b(
     vlm_model: str = "gemini-2.5-flash",
 ) -> list[dict]:
     """Produce VLM-verified annotations for every lifted track."""
+    import time as _time
     sam_tracks_payload = json.loads((out_dir / "sam3" / "tracks.json").read_text())
     sam_tracks = {t["track_id"]: t for t in sam_tracks_payload["tracks"]}
 
     annotations: list[dict] = []
     points_path = out_dir / "points.ply"
+    print(f"[lane_b] {len(lifted_tracks)} tracks, vlm_model={vlm_model}", flush=True)
 
-    for track in lifted_tracks:
+    for ti, track in enumerate(lifted_tracks, start=1):
+        _t_track = _time.time()
         anchor = _largest_anchor_frame(track, sam_tracks, out_dir)
 
         # Render orbital + (optional) anchor crop.
@@ -170,14 +173,14 @@ def run_lane_b(
             logger.warning("VLM call failed for %s: %s", track.track_id, e)
             reply = {"label": "unknown", "alternatives": [], "confidence": 0.1, "reasoning": ""}
 
+        # The verify-with-SAM step was originally a re-prompt + IoU check, but
+        # SAM 3.1's image-only predict-text API isn't part of the unified
+        # video predictor we now use. Disabling for this build — confidence
+        # comes from the VLM call alone, which is already grounded in the
+        # text prompt SAM 3.1 used to find the object in the first place
+        # (so re-verification was somewhat redundant).
         verification = "skipped"
         verify_iou = 0.0
-        if anchor_frame_id and anchor_mask_rel and reply.get("label") not in (None, "unknown"):
-            verification, verify_iou = _verify_with_sam(
-                reply["label"], anchor_frame_id, out_dir, anchor_mask_rel
-            )
-            if verification == "failed":
-                reply["confidence"] = float(reply.get("confidence", 0.5)) * 0.3
 
         lo, hi = _bbox_lo_hi(track.obb_corners)
         annotations.append(
@@ -198,8 +201,12 @@ def run_lane_b(
                 ],
             }
         )
+        print(f"[lane_b]   {ti}/{len(lifted_tracks)} {track.track_id} → "
+              f"label='{reply.get('label','?')}' "
+              f"conf={float(reply.get('confidence',0)):.2f} "
+              f"verify={verification} ({_time.time()-_t_track:.1f}s)", flush=True)
 
     out_path = out_dir / "annotations.b.json"
     out_path.write_text(json.dumps(annotations, indent=2))
-    logger.info("Lane B wrote %d annotations to %s", len(annotations), out_path.name)
+    print(f"[lane_b] wrote {len(annotations)} annotations to {out_path.name}", flush=True)
     return annotations

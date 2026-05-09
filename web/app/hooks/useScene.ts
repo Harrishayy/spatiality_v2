@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchLanePayload, fetchManifest, fetchPointsUrl } from "@/lib/api";
+import { fetchLanePayload, fetchManifest, fetchPointsUrl, HttpError } from "@/lib/api";
 import { useUI } from "@/store/ui";
 import type { Annotation, BBox, LanePayload, Lane, SceneEdge, SpatialLayout, Vec3 } from "@/lib/types";
 
@@ -49,7 +49,13 @@ export function useScene(sceneId: string) {
   const manifest = useQuery({
     queryKey: ["manifest", sceneId],
     queryFn: () => fetchManifest(sceneId),
+    // 404 = scene_id is stale (e.g. localStorage points at a deleted job).
+    // Don't burn retries or keep polling — the page reads `manifest.error`
+    // and bounces the user back to the landing page.
+    retry: (_n, err) => !(err instanceof HttpError && err.status === 404),
     refetchInterval: (q) => {
+      const err = q.state.error;
+      if (err instanceof HttpError && err.status === 404) return false;
       const m = q.state.data;
       if (!m) return POLL_MS;
       const top = m.status;

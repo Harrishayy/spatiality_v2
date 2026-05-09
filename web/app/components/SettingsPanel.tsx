@@ -2,17 +2,16 @@
 
 import { useId } from "react";
 
-import { VLM_MODEL_OPTIONS, type JobSettings, type VlmModelId } from "@/lib/types";
+import type { JobSettings } from "@/lib/types";
 
 export type { JobSettings };
 
 export const DEFAULT_SETTINGS: JobSettings = {
-  fps: 2.0,
   max_frames: 400,
   target_long_side: 1920,
   segment: true,
   keyframes: 5,
-  vlm_model: "claude-haiku-4-5",
+  vlm_model: "gemini-2.5-flash",
 };
 
 interface Props {
@@ -21,39 +20,24 @@ interface Props {
   durationS?: number;
 }
 
-export function SettingsPanel({ value, onChange, durationS }: Props) {
+export function SettingsPanel({ value, onChange, durationS: _durationS }: Props) {
   const set = <K extends keyof JobSettings>(k: K, v: JobSettings[K]) =>
     onChange({ ...value, [k]: v });
 
-  const projectedFrames = durationS
-    ? Math.min(Math.ceil(durationS * value.fps), value.max_frames)
-    : null;
-
   return (
-    <section className="lp-surface">
+    <section className="lp-surface min-w-0">
       <header className="lp-surface-head">
         <div>
           <h2 className="lp-surface-title">Pipeline settings</h2>
           <p className="lp-surface-sub">Tune capture and segmentation before queueing.</p>
         </div>
-        {projectedFrames != null && (
-          <span className="lp-eyebrow-mono">≈ {projectedFrames} frames</span>
-        )}
+        <span className="lp-eyebrow-mono">≤ {value.max_frames} frames</span>
       </header>
 
       <Slider
-        label="Frames per second"
-        suffix="fps"
-        min={0.5}
-        max={10}
-        step={0.5}
-        value={value.fps}
-        onChange={(v) => set("fps", v)}
-      />
-      <Slider
         label="Max frames total"
         min={50}
-        max={800}
+        max={1000}
         step={10}
         value={value.max_frames}
         onChange={(v) => set("max_frames", v)}
@@ -94,25 +78,10 @@ export function SettingsPanel({ value, onChange, durationS }: Props) {
       )}
 
       {value.segment && (
-        <Field
-          label="Labeler"
-          help="Cost is per scene."
-        >
-          <div className="lp-segmented">
-            {VLM_MODEL_OPTIONS.map((opt) => {
-              const active = (value.vlm_model ?? "claude-haiku-4-5") === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  onClick={() => set("vlm_model", opt.id as VlmModelId)}
-                  className={`lp-segmented-row ${active ? "lp-segmented-row--on" : ""}`}
-                >
-                  <span>{opt.label}</span>
-                  <span className="lp-segmented-meta">{opt.cost}</span>
-                </button>
-              );
-            })}
+        <Field label="Labeler">
+          <div className="lp-segmented-row lp-segmented-row--on" aria-disabled>
+            <span>Gemini 2.5 Flash</span>
+            <span className="lp-segmented-meta">VLM</span>
           </div>
         </Field>
       )}

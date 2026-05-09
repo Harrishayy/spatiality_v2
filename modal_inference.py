@@ -19,7 +19,6 @@ Run: ``modal run modal_inference.py::main --input-id <id>``
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import modal
@@ -27,16 +26,10 @@ import modal
 # ---------------------------------------------------------------------------- paths
 
 REPO = Path(__file__).resolve().parent
-ENV_FILE = REPO / ".env"
 SRC_DIR = REPO / "backend" / "src"
 
 INPUTS_VOLUME = "spatiality-inputs"
 OUTPUTS_VOLUME = "spatiality-outputs"
-
-# Modal Secret name. Create once with the keys you have on hand:
-#   modal secret create spatiality HF_TOKEN=hf_xxx GEMINI_API_KEY=AIzaxxx
-# Override the default name by setting SPATIALITY_MODAL_SECRET in your shell.
-MODAL_SECRET_NAME = os.environ.get("SPATIALITY_MODAL_SECRET", "spatiality")
 
 
 # ---------------------------------------------------------------------------- image
@@ -54,25 +47,56 @@ image = (
         "libsm6",
         "libxext6",
     )
+    # Torch first (CUDA wheels), then the slim base, then FlashVGGT/VGGT which
+    # re-use the already-installed torch and pull only their loose deps.
     .pip_install(
-        "numpy>=1.24,<2",
+        "torch==2.4.0",
+        "torchvision==0.19.0",
+    )
+    .pip_install(
+        # SAM3.1 (in segmentation image) requires numpy>=1.26 — keeping the same
+        # floor here so artefacts produced by inference round-trip cleanly.
+        "numpy>=1.26,<2",
         "Pillow",
         "opencv-python-headless",
         "scipy",
         "einops",
         "huggingface_hub[hf_transfer]",
-        "torch==2.4.0",
-        "torchvision==0.19.0",
-        "plyfile",
-        "trimesh",
         "tqdm",
     )
-    # FlashVGGT (preferred) and base VGGT (fallback). Pulled directly from the
-    # canonical repos so we always get the latest published weights/configs.
+    # Base VGGT — clean pyproject, installs straight from git.
+    .pip_install("git+https://github.com/facebookresearch/vggt.git@main")
+    # FlashVGGT runtime deps that upstream's pyproject.toml omits.
+    # Audited from the actual source tree:
+    #   - torch_kmeans     module-level import in flashvggt/models/aggregator.py
+    #   - kornia, iopath,  listed in requirements.txt; imported by
+    #     fvcore, wcmatch  flashvggt/dependency/* modules (not always in our
+    #                      import chain, but cheap insurance)
+    #   - pycolmap         pose-refinement helpers in dependency/
+    #   - lightglue        feature matching; not on PyPI, install from git
     .pip_install(
-        "git+https://github.com/wzpscott/FlashVGGT.git@main",
-        # Fallback. Same package surface as FlashVGGT's; both expose `vggt.models.vggt.VGGT`.
-        "git+https://github.com/facebookresearch/vggt.git@main",
+        "torch_kmeans",
+        "kornia",
+        "iopath",
+        "fvcore",
+        "wcmatch",
+        "pycolmap",
+    )
+    .pip_install("git+https://github.com/cvg/LightGlue.git@main")
+    # FlashVGGT — upstream pyproject is broken: `include` uses non-glob
+    # names so `flashvggt.models`, `flashvggt.utils`, etc. never get
+    # installed, AND there are no `__init__.py` files so namespace-package
+    # discovery is required. We swap in a corrected pyproject.toml from
+    # ./patches/ and install from the patched source tree.
+    .add_local_file(
+        str(REPO / "patches" / "flashvggt_pyproject.toml"),
+        remote_path="/tmp/flashvggt_pyproject.toml",
+        copy=True,
+    )
+    .run_commands(
+        "git clone --depth 1 https://github.com/wzpscott/FlashVGGT.git /tmp/flashvggt",
+        "cp /tmp/flashvggt_pyproject.toml /tmp/flashvggt/pyproject.toml",
+        "pip install /tmp/flashvggt",
     )
     .env(
         {
@@ -80,7 +104,20 @@ image = (
             "SPATIALITY_DATA_ROOT": "/inputs",
             "SPATIALITY_ARTEFACTS_ROOT": "/outputs",
             "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            # FlashVGGT pulls wandb[media] transitively; disable so a missing
+            # WANDB_API_KEY never blocks startup.
+            "WANDB_DISABLED": "true",
+            "WANDB_MODE": "disabled",
         }
+    )
+    # Pre-download model weights at image build time so cold starts skip
+    # the FlashVGGT (~5 GB) + base VGGT (~3 GB) HF fetches. The `huggingface`
+    # secret provides HF_TOKEN for facebook/VGGT-1B (gated). ZipW/FlashVGGT
+    # is public so it'd download without the secret too.
+    .run_commands(
+        "python -c 'from huggingface_hub import hf_hub_download; hf_hub_download(repo_id=\"ZipW/FlashVGGT\", filename=\"flashvggt.pt\")'",
+        "python -c 'from vggt.models.vggt import VGGT; VGGT.from_pretrained(\"facebook/VGGT-1B\")'",
+        secrets=[modal.Secret.from_name("huggingface")],
     )
     .add_local_dir(str(SRC_DIR), remote_path="/root/src")
 )
@@ -91,9 +128,9 @@ image = (
 inputs_vol = modal.Volume.from_name(INPUTS_VOLUME, create_if_missing=True)
 outputs_vol = modal.Volume.from_name(OUTPUTS_VOLUME, create_if_missing=True)
 
-secret = (
-    modal.Secret.from_dotenv(path=ENV_FILE) if ENV_FILE.exists() else None
-)
+# Existing Modal Secrets in this workspace. `huggingface` exposes HF_TOKEN
+# (gated SAM3.1 / VGGT weights). Inference doesn't need pydantic-gateway.
+secrets = [modal.Secret.from_name("huggingface")]
 
 
 # ---------------------------------------------------------------------------- app + resources
@@ -111,7 +148,7 @@ _FN_KW = dict(
     image=image,
     gpu=GPU_KIND,
     volumes={"/inputs": inputs_vol, "/outputs": outputs_vol},
-    secrets=[secret] if secret else [],
+    secrets=secrets,
     cpu=GPU_CPU,
     memory=GPU_MEMORY_MB,
     timeout=TIMEOUT,
@@ -123,7 +160,16 @@ _FN_KW = dict(
 
 @app.function(**_FN_KW)
 def run_inference_one(input_id: str, **kwargs) -> dict:
-    """Run inference on a single input. Delegates to ``spatiality.inference.run``."""
+    """Run inference on a single input. Delegates to ``spatiality.inference.run``.
+
+    Always runs a SINGLE forward pass over the full sequence — no chunking.
+    Chunked VGGT/FlashVGGT solves are chunk-local (each chunk's first frame
+    is pinned at the world origin), and naive concatenation of those windows
+    produces N disjoint reconstructions overlapping at the origin. FlashVGGT
+    handles 500+ frames at 518×518 in a single forward on A100-80GB
+    (~245s observed on IMG_7531). If a sequence is too large for one
+    forward, raise the GPU class — don't chunk.
+    """
     inputs_vol.reload()
     outputs_vol.reload()
 
@@ -138,6 +184,51 @@ def run_inference_one(input_id: str, **kwargs) -> dict:
 # ---------------------------------------------------------------------------- local entrypoints
 
 
+# Where the FastAPI server (backend/main.py) reads scene artifacts from. We
+# mirror the Modal outputs volume here so /scenes/<id> works the same whether
+# the run was kicked off via POST /api/jobs (which already pulls) or via
+# `modal run modal_inference.py::main` (which previously left the data on the
+# remote volume and required a manual `modal volume get`).
+_LOCAL_OUTPUTS_ROOT = REPO / "backend" / "data" / "outputs"
+
+
+def _pull_outputs_to_local(input_id: str) -> int:
+    """Stream every file under `/<input_id>/` on the outputs volume into
+    backend/data/outputs/<input_id>/. Returns count of files written.
+
+    Mirror of `backend.main._pull_outputs_from_modal` — duplicated here so the
+    Modal local_entrypoint stays self-contained (no FastAPI import).
+    """
+    dst_root = _LOCAL_OUTPUTS_ROOT / input_id
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    def _walk(remote_dir: str):
+        for entry in outputs_vol.iterdir(remote_dir):
+            # FileEntryType.DIRECTORY == 2 in the Modal SDK.
+            if getattr(entry, "type", None) and int(entry.type) == 2:
+                yield from _walk(entry.path)
+            else:
+                yield entry.path
+
+    try:
+        files = list(_walk(f"/{input_id}"))
+    except FileNotFoundError:
+        print(f"[pull] no remote dir /{input_id} on outputs volume", flush=True)
+        return 0
+
+    written = 0
+    for remote_path in files:
+        rel = remote_path.lstrip("/")[len(input_id) + 1:]  # strip "<id>/"
+        local_path = dst_root / rel
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with local_path.open("wb") as f:
+            for chunk in outputs_vol.read_file(remote_path):
+                f.write(chunk)
+        written += 1
+    print(f"[pull] mirrored {written} file(s) → {dst_root}", flush=True)
+    return written
+
+
 @app.local_entrypoint()
 def main(input_id: str = "", all: bool = False) -> None:
     """``modal run modal_inference.py::main --input-id <id>`` or ``--all``."""
@@ -148,3 +239,4 @@ def main(input_id: str = "", all: bool = False) -> None:
 
     result = run_inference_one.remote(input_id)
     print(result)
+    _pull_outputs_to_local(input_id)

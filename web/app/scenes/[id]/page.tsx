@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { Header } from "@/components/Header";
 import { LaneSwitcher } from "@/components/LaneSwitcher";
@@ -15,7 +15,7 @@ import {
 import { StageDrawer } from "@/components/StageDrawer";
 import { useChat } from "@/hooks/useChat";
 import { useScene } from "@/hooks/useScene";
-import { getArtifactUrl } from "@/lib/api";
+import { getArtifactUrl, HttpError } from "@/lib/api";
 import { useUI } from "@/store/ui";
 import type { Manifest, StageStatus } from "@/lib/types";
 
@@ -26,11 +26,21 @@ const SplatViewer = dynamic(
 
 export default function ScenePage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
   const sceneId = params?.id ?? "";
   const { manifest, annotations, splatUrl, splatReady, segReady } = useScene(sceneId);
   const { messages, send } = useChat(sceneId);
   const selectedId = useUI((s) => s.selectedId);
   const [openSection, setOpenSection] = useState<SceneSection | null>(null);
+
+  // Stale scene_id (deleted on disk, often comes from localStorage pointing
+  // at an old job) — bounce to the landing page instead of polling 404s
+  // forever. useScene already disables retry+refetch on 404.
+  const notFound =
+    manifest.error instanceof HttpError && manifest.error.status === 404;
+  useEffect(() => {
+    if (notFound) router.replace("/");
+  }, [notFound, router]);
 
   // When the user picks an object marker, swing the Evidence drawer open.
   // When they deselect, fold Evidence back away — but leave Pipeline /

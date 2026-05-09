@@ -1,0 +1,42 @@
+# Vendored replacement for FlashVGGT's broken pyproject.toml.
+#
+# Upstream issue (https://github.com/wzpscott/FlashVGGT): the `find` block
+# misses every subpackage because (a) `include` uses literal names instead
+# of globs and (b) `flashvggt/` and its subdirs have no `__init__.py`, so
+# setuptools' default `find` (which requires `__init__.py`) won't pick them
+# up even with the right glob.
+#
+# Fix: enable namespace-package discovery and use wildcard globs.
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashvggt"
+version = "0.1.0"
+description = "FlashVGGT: Efficient and Scalable Visual Geometry Transformers with Compressed Descriptor Attention"
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "einops",
+    "tqdm",
+    "huggingface_hub",
+    "safetensors",
+    "hydra-core",
+    "accelerate",
+    "wandb[media]",
+    "opencv-python",
+    "matplotlib",
+    "open3d",
+    "plyfile",
+]
+
+[tool.setuptools.packages.find]
+namespaces = true
+where = ["."]
+exclude = ["outputs*", "ckpts*", "examples*", "eval*", "assets*"]
+include = ["flashvggt*", "flashvggt_stream*"]

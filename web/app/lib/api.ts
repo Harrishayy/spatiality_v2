@@ -14,10 +14,19 @@ export function getArtifactUrl(sceneId: string, artifact: string): string {
   return `/artifacts/scenes/${encodeURIComponent(sceneId)}/${artifact}`;
 }
 
+export class HttpError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
 async function unwrap<T>(res: Response, label: string): Promise<T> {
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `${label}: ${res.status}` }));
-    throw new Error(err.error ?? `${label}: ${res.status}`);
+    throw new HttpError(err.error ?? `${label}: ${res.status}`, res.status);
   }
   return res.json();
 }

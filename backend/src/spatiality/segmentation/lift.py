@@ -366,15 +366,23 @@ def run_lifting(
     out_dir: Path,
 ) -> list[LiftedTrack]:
     """Lift every SAM 3.1 track to a `LiftedTrack`, then run the safety-net merge."""
+    import time as _time
     cameras = json.loads((out_dir / "cameras.json").read_text())
+    print(f"[lift] {len(tracks)} tracks, {len(cameras.get('frames', []))} cameras loaded", flush=True)
 
     lifted: list[LiftedTrack] = []
-    for tr in tracks:
+    _t = _time.time()
+    for i, tr in enumerate(tracks, start=1):
         result = lift_track(tr, out_dir, cameras)
         if result is not None:
             lifted.append(result)
+        if i % 10 == 0 or i == len(tracks):
+            print(f"[lift]   {i}/{len(tracks)} tracks processed, "
+                  f"{len(lifted)} lifted ({_time.time()-_t:.1f}s)", flush=True)
 
-    logger.info("lifted %d/%d tracks", len(lifted), len(tracks))
+    print(f"[lift] before stitch: {len(lifted)} / {len(tracks)} lifted", flush=True)
+    _t_merge = _time.time()
     merged = merge_tracks(lifted)
-    logger.info("after stitching: %d tracks", len(merged))
+    print(f"[lift] after stitch: {len(merged)} tracks "
+          f"({_time.time()-_t_merge:.1f}s)", flush=True)
     return merged

@@ -102,7 +102,6 @@ export type VlmModelId =
   | "claude-opus-4-7";
 
 export interface JobSettings {
-  fps: number;
   max_frames: number;
   target_long_side: number;
   segment: boolean;

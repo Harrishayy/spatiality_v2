@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from .flashvggt import points_from_results, run_inference
+from .frame_select import select_frames
 
 logger = logging.getLogger(__name__)
 
@@ -148,11 +149,38 @@ def run(input_id: str, **kwargs) -> dict:
     """Entry point called from ``modal_inference.py::run_inference_one``.
 
     ``kwargs`` accepted:
-      conf_threshold (float): drop points below this confidence in points.ply (default 0.05).
-      chunk_size (int): override the model batch size (0 = no chunking).
+      conf_min (float): drop pixels with VGGT depth_conf below this
+        absolute floor. Default 0.15 — matches the old `spatiality` repo's
+        VGGT_DEPTH_CONF_MIN=0.2 (slightly looser to keep textureless
+        walls/floor that 0.2 wiped on handheld captures). depth_conf uses
+        `expp1` activation, so values cluster >>1 on confident pixels and
+        drift toward 0 on sky / blur / dark. Set to 0 to disable.
+      pixel_stride (int): take every Nth pixel per frame before unprojection.
+        Default 2 → 4× fewer points per frame; the target_count cap below
+        keeps the final cloud size bounded regardless of stride.
+      target_count (int): random-subsample the final cloud to at most this
+        many points. Default 50,000,000 — three.js Points handles 50 M
+        easily on M-series Macs / RTX 3070+ (300 MB GPU buffer; 800 MB
+        on-disk PLY). Bump to 100_000_000 for "walk-in" demo captures
+        (1.6 GB PLY; ~600 MB GPU; works on M2/M3 Pro/Max). Set None to
+        disable the cap entirely.
+      depth_grad_max (float): drop pixels where |∇depth|/depth > this.
+        Default 0.06. Silhouette guard — kills floaters at object edges.
+      depth_far_pct, depth_far_mult (float): drop pixels with depth above
+        percentile_of_(depth_far_pct) × depth_far_mult per frame. Defaults
+        95.0 and 1.5. Removes sky / unbounded background.
+      blur_drop_pct (float): drop the bottom X fraction of frames by
+        Laplacian variance before they hit the model. Default 0.20.
+        Set to 0 to disable.
     """
-    conf_threshold = float(kwargs.get("conf_threshold", 0.05))
-    chunk_size = int(kwargs.get("chunk_size", 0))
+    conf_min = float(kwargs.get("conf_min", 0.15))
+    pixel_stride = int(kwargs.get("pixel_stride", 2))
+    target_count = int(kwargs.get("target_count", 50_000_000))
+    depth_grad_max = float(kwargs.get("depth_grad_max", 0.06))
+    depth_far_pct = float(kwargs.get("depth_far_pct", 95.0))
+    depth_far_mult = float(kwargs.get("depth_far_mult", 1.5))
+    blur_drop_pct = float(kwargs.get("blur_drop_pct", 0.20))
+    frames_max_kw = kwargs.get("frames_max")  # None → use whatever ffmpeg produced
 
     in_dir = _data_root() / input_id
     out_dir = _artefact_root() / input_id
@@ -164,31 +192,71 @@ def run(input_id: str, **kwargs) -> dict:
     frame_paths = _list_frames(in_dir)
     if not frame_paths:
         raise SystemExit(f"no frames found under {in_dir}")
+    n_pre_select = len(frame_paths)
 
-    logger.info("running geometry on %d frames", len(frame_paths))
+    # Blur filter — drop motion-blurred frames BEFORE they hit FlashVGGT.
+    # This is the single highest-impact fix for handheld iPhone captures: the
+    # pose head's robustness depends on the encoder seeing in-focus content,
+    # and a single blurry frame mid-sequence is enough to crash the global
+    # feature bank into a wrong attractor (visible as ghost-duplicates of
+    # objects in the resulting point cloud — see analysis at frames 480-491
+    # of the prior IMG_7531 run, where pose ΔR exceeded 30° in single steps).
+    # Ported from the old `spatiality` repo's `_frame_select.py`.
+    if blur_drop_pct > 0.0:
+        frame_paths = select_frames(
+            frame_paths,
+            frames_max=int(frames_max_kw) if frames_max_kw else len(frame_paths),
+            blur_drop_pct=blur_drop_pct,
+            log_prefix="[stage:poses] blur_filter",
+        )
+    print(f"[stage:poses] input_id={input_id} frames={len(frame_paths)}/{n_pre_select} "
+          f"conf_min={conf_min} pixel_stride={pixel_stride} "
+          f"target_count={target_count} depth_grad_max={depth_grad_max} "
+          f"depth_far_pct={depth_far_pct} depth_far_mult={depth_far_mult} "
+          f"blur_drop_pct={blur_drop_pct}", flush=True)
+
+    # Crash-safety: stash the raw forward-pass tensors here. If anything
+    # downstream of the GPU forward fails (pose decode, K rescale, file I/O),
+    # the next retry resumes from this file instead of redoing 12 min of A100.
+    forward_ckpt = out_dir / "_forward_preds.pt"
 
     t0 = time.time()
-    results, meta = run_inference(frame_paths, chunk_size=chunk_size)
+    results, meta = run_inference(frame_paths, checkpoint_path=forward_ckpt)
 
     # Persist per-frame depth + conf, copy/save the originals into frames/ so
     # the UI evidence gallery can serve them.
-    for r in results:
+    print(f"[stage:poses] writing {len(results)} depth + conf + frame copies …", flush=True)
+    t_write = time.time()
+    for i, r in enumerate(results):
         np.save(out_dir / "depth" / f"{r.frame_id}.npy", r.depth)
         np.save(out_dir / "depth_conf" / f"{r.frame_id}.npy", r.depth_conf)
-
-        # Save originals as PNG (frontend evidence URLs accept any extension;
-        # PNG keeps colour fidelity for VLM inputs).
         png_path = out_dir / "frames" / f"{r.frame_id}.png"
         if not png_path.exists():
             from PIL import Image  # noqa: PLC0415
-
             Image.fromarray(r.image_rgb).save(png_path)
+        if (i + 1) % 100 == 0 or (i + 1) == len(results):
+            print(f"[stage:poses]   wrote {i+1}/{len(results)} "
+                  f"({time.time()-t_write:.1f}s elapsed)", flush=True)
 
-    xyz, rgb, conf = points_from_results(results, conf_threshold=conf_threshold)
+    print("[stage:poses] building points.ply …", flush=True)
+    t_pts = time.time()
+    xyz, rgb, conf = points_from_results(
+        results,
+        conf_min=conf_min,
+        pixel_stride=pixel_stride,
+        target_count=target_count,
+        depth_grad_max=depth_grad_max,
+        depth_far_pct=depth_far_pct,
+        depth_far_mult=depth_far_mult,
+    )
     _write_ply(out_dir / "points.ply", xyz, rgb, conf)
+    print(f"[stage:poses] points.ply: {xyz.shape[0]:,} points "
+          f"({(out_dir/'points.ply').stat().st_size/1e6:.1f} MB) "
+          f"in {time.time()-t_pts:.1f}s", flush=True)
 
     first_size = (results[0].image_rgb.shape[0], results[0].image_rgb.shape[1])
     _write_cameras(out_dir / "cameras.json", results, first_size)
+    print(f"[stage:poses] cameras.json written ({len(results)} K/R/t entries)", flush=True)
 
     duration = time.time() - t0
     stage_entry = {
@@ -200,10 +268,17 @@ def run(input_id: str, **kwargs) -> dict:
     }
     _update_manifest(out_dir, stage_entry)
 
-    logger.info(
-        "geometry done in %.2fs (%s, %d points, %d frames)",
-        duration, meta["backend"], xyz.shape[0], len(frame_paths),
-    )
+    # Final artefacts are on disk → drop the forward checkpoint to free the volume.
+    if forward_ckpt.exists():
+        try:
+            forward_ckpt.unlink()
+            print(f"[stage:poses] cleaned up forward checkpoint", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[stage:poses] WARN: could not delete {forward_ckpt}: {e}", flush=True)
+
+    print(f"[stage:poses] DONE in {duration:.1f}s "
+          f"(backend={meta['backend']}, {xyz.shape[0]:,} points, "
+          f"{len(frame_paths)} frames)", flush=True)
     return {
         "input_id": input_id,
         "status": "complete",

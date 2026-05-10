@@ -188,6 +188,8 @@ def run(input_id: str, **kwargs) -> dict:
     (out_dir / "depth").mkdir(exist_ok=True)
     (out_dir / "depth_conf").mkdir(exist_ok=True)
     (out_dir / "frames").mkdir(exist_ok=True)
+    # Optional VGGT point-head outputs — directories created lazily below
+    # if and only if the inference call actually populated them.
 
     frame_paths = _list_frames(in_dir)
     if not frame_paths:
@@ -227,9 +229,33 @@ def run(input_id: str, **kwargs) -> dict:
     # the UI evidence gallery can serve them.
     print(f"[stage:poses] writing {len(results)} depth + conf + frame copies …", flush=True)
     t_write = time.time()
+    # World-points stride for storage. Stage 3's lift only consumes
+    # per-mask-pixel lookups, so a half-resolution copy is plenty and cuts
+    # disk by 4× (1474×1472×6 bytes/frame × 573 frames ≈ 7.5 GB → ~1.9 GB
+    # at stride-2). Stride-1 is exact; stride-4 is acceptable for very
+    # large scenes if disk pressure rises.
+    _WP_STRIDE = 2
+
+    have_wp = any(r.world_points is not None for r in results)
+    have_wpc = any(r.world_points_conf is not None for r in results)
+    if have_wp:
+        (out_dir / "world_points").mkdir(exist_ok=True)
+    if have_wpc:
+        (out_dir / "world_points_conf").mkdir(exist_ok=True)
+
     for i, r in enumerate(results):
         np.save(out_dir / "depth" / f"{r.frame_id}.npy", r.depth)
         np.save(out_dir / "depth_conf" / f"{r.frame_id}.npy", r.depth_conf)
+        if r.world_points is not None:
+            np.save(
+                out_dir / "world_points" / f"{r.frame_id}.npy",
+                r.world_points[::_WP_STRIDE, ::_WP_STRIDE].astype(np.float16),
+            )
+        if r.world_points_conf is not None:
+            np.save(
+                out_dir / "world_points_conf" / f"{r.frame_id}.npy",
+                r.world_points_conf[::_WP_STRIDE, ::_WP_STRIDE].astype(np.float16),
+            )
         png_path = out_dir / "frames" / f"{r.frame_id}.png"
         if not png_path.exists():
             from PIL import Image  # noqa: PLC0415
@@ -237,6 +263,9 @@ def run(input_id: str, **kwargs) -> dict:
         if (i + 1) % 100 == 0 or (i + 1) == len(results):
             print(f"[stage:poses]   wrote {i+1}/{len(results)} "
                   f"({time.time()-t_write:.1f}s elapsed)", flush=True)
+    if have_wp:
+        print(f"[stage:poses]   world_points saved at stride-{_WP_STRIDE} "
+              f"({len(results)} frames)", flush=True)
 
     print("[stage:poses] building points.ply …", flush=True)
     t_pts = time.time()

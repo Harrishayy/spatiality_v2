@@ -5,14 +5,12 @@ import type { ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { Header } from "@/components/Header";
-import { LaneSwitcher } from "@/components/LaneSwitcher";
 import { PipelineProgress } from "@/components/PipelineProgress";
 import {
   SceneDrawerOverlay,
   SceneSideColumn,
   type SceneSection,
 } from "@/components/SidePanel";
-import { StageDrawer } from "@/components/StageDrawer";
 import { useChat } from "@/hooks/useChat";
 import { useScene } from "@/hooks/useScene";
 import { getArtifactUrl, HttpError } from "@/lib/api";
@@ -28,7 +26,7 @@ export default function ScenePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const sceneId = params?.id ?? "";
-  const { manifest, annotations, splatUrl, splatReady, segReady } = useScene(sceneId);
+  const { manifest, annotations, discarded, splatUrl, splatReady, segReady } = useScene(sceneId);
   const { messages, send } = useChat(sceneId);
   const selectedId = useUI((s) => s.selectedId);
   const [openSection, setOpenSection] = useState<SceneSection | null>(null);
@@ -55,6 +53,7 @@ export default function ScenePage() {
   // data is unchanged; the ?? [] fallback used to mint a fresh array each
   // render, which would tear down the SplatViewer on every poll.
   const annos = useMemo(() => annotations.data ?? [], [annotations.data]);
+  const discardedAnnos = useMemo(() => discarded.data ?? [], [discarded.data]);
   const emptySplat = (m?.stats.splat_size_mb ?? 0) <= 0.001;
   // Only pass a wireframeUrl when the manifest advertises one. The viewer
   // skips its artifact fetch otherwise (and falls back to voxel sampling),
@@ -82,12 +81,6 @@ export default function ScenePage() {
             <PipelinePending manifest={m} failed={failed} />
           )}
 
-          {segReady && (
-            <div className="pointer-events-auto absolute left-3 top-3 z-20">
-              <LaneSwitcher />
-            </div>
-          )}
-
           {splatReady && !segReady && segStatus !== "failed" && (
             <SegmentingBanner status={segStatus} />
           )}
@@ -103,6 +96,7 @@ export default function ScenePage() {
             <SceneDrawerOverlay
               manifest={m}
               annotations={annos}
+              discarded={discardedAnnos}
               segStatus={segStatus}
               openSection={openSection}
               onClose={() => setOpenSection(null)}
@@ -124,10 +118,6 @@ export default function ScenePage() {
           />
         )}
       </main>
-
-      {/* Drill-down drawer — opens when a Pipeline row is clicked. Lives at
-          page level so the backdrop covers the splat viewer too. */}
-      <StageDrawer sceneId={sceneId} manifestStatus={m?.status ?? null} />
     </div>
   );
 }

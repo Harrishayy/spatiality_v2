@@ -1,30 +1,32 @@
-"""VLM scene scout — discover what's actually in the video before SAM 3.1.
+"""VLM scene scout — discover what's in each temporal slice of the video.
 
 Replaces the static 40-phrase vocabulary that used to drive SAM 3.1's
-open-vocabulary detector with a per-scene list discovered by Gemini 2.5
-Flash. The scout chops the timeline into temporal slices, fires one Flash
-call per slice in parallel (via asyncio.gather), then merges + dedupes
-the phrases.
+open-vocabulary detector with a per-scene, per-slice list discovered by
+Gemini 2.5 Flash. The scout chops the timeline into ~20 temporal slices,
+fires one Flash call per slice in parallel (asyncio.gather), then returns
+each phrase tagged with the frame range it was discovered in so SAM 3.1
+can propagate that phrase only over the relevant frames instead of the
+whole video.
 
-Why per-slice batches instead of one global pass:
-  - 6 evenly-spaced frames out of a 500-frame walkthrough is fine for "what
-    objects are in this single room" but bad for multi-room walkthroughs or
-    briefly-framed objects (Roomba on the floor, a cat passing through, a
-    shelf the camera lingers on for ~30 frames before panning away). Those
-    miss the global samples entirely.
-  - Gemini Flash legibility drops past ~10–15 images per call (attention
-    spreads thin, instances merge, detail is dropped). So "more frames" has
-    to mean "more calls", not "one bigger call".
-  - One call per ~50 frames + 6 images per call → ~12% temporal sampling
-    on a typical clip. All calls go out concurrently with asyncio.gather,
-    so wall-clock is bounded by the slowest single call (~3–8s).
+Why per-slice scoping matters:
+  - SAM 3.1 wall-clock is dominated by `propagate_in_video`, which runs
+    the full attention pipeline once per frame in the session.
+  - Today: every scout phrase, whether seen in slice 1 or slice 17,
+    propagates across all 573 frames → one full-video pass per phrase.
+  - With per-slice scoping: a phrase from slice 5 only propagates over
+    that slice's frames (+ padding) → ~10× fewer frame-iterations on
+    average.
+  - When the same phrase appears in multiple slices, we union the slice
+    ranges so SAM 3.1 keeps a single track with stable identity across
+    those slices (avoids cross-track stitching for the easy case).
 
-Why this matters for SAM 3.1 cost:
-  - Each phrase the scout emits costs SAM one bidirectional propagation
-    across the full clip. So phrase quantity directly bounds SAM wall-clock.
-  - We dedupe aggressively (case-insensitive, whitespace-trimmed) before
-    handing the list to SAM, and cap at `_MAX_PROMPTS` so SAM time stays
-    bounded even on visually busy scenes.
+Why a tiny global safety net is still useful:
+  - "person" is universal — humans walk through scenes briefly enough
+    that scout often misses them in any given slice. Running this as a
+    global propagation costs one full-video pass and catches them
+    regardless of when they appear.
+  - Door / window etc. don't go on the safety net: they're static and
+    one slice discovery is enough.
 
 The scout never returns regions ("kitchen"), materials ("wood"), or
 abstractions ("lighting") — only segmentable noun phrases.
@@ -33,8 +35,10 @@ abstractions ("lighting") — only segmentable noun phrases.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -46,26 +50,68 @@ from .vlm import call_vlm_async
 logger = logging.getLogger(__name__)
 
 
-# Universal segmentable categories VLMs sometimes drop from enumerations
-# (people walking through, doors/windows that frame the scene). Always
-# added; SAM 3.1 only finds them if visible, so adding them costs at most
-# three extra propagations on scenes where they're absent.
-_SAFETY_NET: list[str] = ["person", "door", "window"]
+# Closed-class safety-net taxonomy (GLIP / OWL-ViT-2 hybrid scouting,
+# Li et al. CVPR 2022; Minderer et al. NeurIPS 2023). Open-vocab scouts
+# miss common objects depending on which slice gets sampled — laptops
+# absent in slice 4 may still appear in slices 6-8, and so on. Pairing
+# scout's open-vocab discovery with a fixed closed-class list ensures
+# these recurrent indoor classes are always candidate phrases for GDINO.
+# Each entry adds ~one phrase to the multi-phrase GDINO query, which
+# scales sub-linearly in the text encoder — wall-clock cost is negligible.
+_GLOBAL_SAFETY_NET: list[str] = [
+    "person",
+    "laptop",
+    "computer monitor",
+    "plush toy",
+    "stuffed animal",
+    "door",
+    "wardrobe",
+    "closet",
+    "table lamp",
+    "book",
+    "remote control",
+    "ceiling light",
+]
 
-# Each prompt costs one bidirectional propagation, so this directly bounds
-# SAM 3.1 wall-clock. Bumped from 25 → 35 because the multi-batch scout
-# produces a richer list and we don't want the cap to throw recall away.
-_MAX_PROMPTS = 35
+# How many temporal slices to chop the video into. ~20 is the sweet spot:
+# enough that each slice covers ~25-30 frames (small enough to run cheap
+# slice-bounded SAM passes), few enough that each Gemini call still sees
+# 6 well-spread frames (Flash legibility holds up).
+_TARGET_N_SLICES = 20
 
-# Roughly one Flash call per this many frames. 50 = ~10 batches on a
-# 500-frame walkthrough. Calls are async-parallel so this only changes
-# coverage, not wall-clock.
-_FRAMES_PER_BATCH = 50
+# Don't slice below this — tiny slices give Gemini too little context.
+_MIN_FRAMES_PER_SLICE = 8
+
+# Open-vocab discovery cap. Bumped from 25 → 40 (we hit the cap on the
+# demo scene, trimming long-tail filler that occasionally was a real
+# object). The closed-class safety net above operates orthogonally to
+# this cap, so the lower-bound on coverage is the safety-net length even
+# if scout discovers nothing.
+_MAX_SCOPED_PROMPTS = 40
 
 # How many evenly-spaced frames each batch sends to Gemini. 6 is the
 # Flash legibility sweet spot: more than that and the model starts merging
 # instances across images.
 _IMAGES_PER_BATCH = 6
+
+# Frames of padding added on each side of a phrase's slice range before
+# handing it to SAM 3.1. Catches objects that drift across slice
+# boundaries without scout flagging the adjacent slice.
+_RANGE_PADDING_FRAMES = 15
+
+
+@dataclass
+class ScopedPrompt:
+    """A phrase + the absolute frame range over which SAM 3.1 should track it.
+
+    `frame_range` is ``None`` for safety-net (global) prompts that should
+    propagate across the entire video. Otherwise it's a half-open
+    ``[start, end)`` interval over absolute video frame indices, already
+    padded for entry/exit slack.
+    """
+
+    phrase: str
+    frame_range: tuple[int, int] | None
 
 
 class SceneInventory(BaseModel):
@@ -106,9 +152,13 @@ first). Don't pad — only list what's actually in these frames.\
 """
 
 
-def _slice_boundaries(n_total: int, frames_per_slice: int) -> list[tuple[int, int]]:
-    """Partition [0, n_total) into roughly equal consecutive [start, end) slices."""
-    n_slices = max(1, math.ceil(n_total / frames_per_slice))
+def _slice_boundaries(n_total: int, target_n_slices: int) -> list[tuple[int, int]]:
+    """Partition [0, n_total) into roughly equal consecutive [start, end) slices.
+
+    Aims for ``target_n_slices`` slices but never lets a slice get smaller
+    than ``_MIN_FRAMES_PER_SLICE``.
+    """
+    n_slices = max(1, min(target_n_slices, n_total // _MIN_FRAMES_PER_SLICE))
     boundaries = np.linspace(0, n_total, n_slices + 1).astype(int)
     return [(int(boundaries[i]), int(boundaries[i + 1])) for i in range(n_slices)]
 
@@ -160,13 +210,13 @@ async def _scout_one_batch(
 
 async def _scout_all_batches(
     frame_paths: list[Path],
+    slices: list[tuple[int, int]],
     vlm_model: str,
 ) -> list[list[str]]:
-    slices = _slice_boundaries(len(frame_paths), _FRAMES_PER_BATCH)
     n_batches = len(slices)
     print(
         f"[scout] dispatching {n_batches} parallel Flash calls "
-        f"(~{_FRAMES_PER_BATCH} frames per slice, {_IMAGES_PER_BATCH} images per call)",
+        f"(target ~{_TARGET_N_SLICES} slices, {_IMAGES_PER_BATCH} images per call)",
         flush=True,
     )
 
@@ -183,18 +233,55 @@ async def _scout_all_batches(
     return await asyncio.gather(*tasks)
 
 
+def _checkpoint_path(frames_dir: Path) -> Path:
+    """Where to cache scout output. Sits next to the scene's geometry artefacts."""
+    return frames_dir.parent / "scout_prompts.json"
+
+
+def _serialise(scoped: list[ScopedPrompt]) -> list[dict]:
+    return [{"phrase": s.phrase, "frame_range": list(s.frame_range) if s.frame_range else None}
+            for s in scoped]
+
+
+def _deserialise(payload: list[dict]) -> list[ScopedPrompt]:
+    out: list[ScopedPrompt] = []
+    for p in payload:
+        fr = p.get("frame_range")
+        out.append(ScopedPrompt(
+            phrase=p["phrase"],
+            frame_range=tuple(fr) if fr is not None else None,
+        ))
+    return out
+
+
 def discover_scene_prompts(
     frames_dir: Path,
     vlm_model: str = "gemini-2.5-flash",
     n_frames: int = 6,  # kept for API back-compat; now per-batch, not global
-) -> list[str]:
-    """Return the concrete-noun-phrase list SAM 3.1 should look for.
+) -> list[ScopedPrompt]:
+    """Return per-slice scoped prompts SAM 3.1 should look for.
 
-    Fans out one Gemini Flash call per ~50-frame slice, runs them in parallel
-    via asyncio.gather, then merges + dedupes. On total VLM failure (every
-    batch errors) returns just the safety-net list so the pipeline still
-    runs in degraded mode.
+    Returns a list of ``ScopedPrompt`` objects, each tagged with the
+    absolute frame range over which SAM 3.1 should track that phrase.
+    Phrases discovered in multiple slices have their ranges unioned (so
+    SAM keeps single-track identity across runs of the same object class).
+    Safety-net phrases get ``frame_range=None`` and propagate over the
+    full video.
+
+    On total VLM failure (every batch errors) returns just the safety net.
     """
+    # Resume shortcut — scout is the only stage where the same call costs
+    # 60+ seconds AND the result is deterministic enough to cache. If we
+    # already have a checkpoint, return it directly.
+    ckpt = _checkpoint_path(frames_dir)
+    if ckpt.exists():
+        try:
+            scoped = _deserialise(json.loads(ckpt.read_text()))
+            print(f"[scout] resuming from {ckpt.name} ({len(scoped)} prompts)", flush=True)
+            return scoped
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not parse %s (%s); re-running scout", ckpt.name, e)
+
     frame_paths = sorted(
         p for p in frames_dir.iterdir()
         if p.suffix.lower() in (".png", ".jpg", ".jpeg")
@@ -202,13 +289,16 @@ def discover_scene_prompts(
     if not frame_paths:
         raise SystemExit(f"no frames under {frames_dir}")
 
+    n_total = len(frame_paths)
+    slices = _slice_boundaries(n_total, _TARGET_N_SLICES)
     print(
-        f"[scout] {len(frame_paths)} frames available, model={vlm_model}",
+        f"[scout] {n_total} frames → {len(slices)} slices "
+        f"(~{n_total // max(1, len(slices))} frames each), model={vlm_model}",
         flush=True,
     )
 
     try:
-        per_batch = asyncio.run(_scout_all_batches(frame_paths, vlm_model))
+        per_batch = asyncio.run(_scout_all_batches(frame_paths, slices, vlm_model))
     except Exception as e:  # noqa: BLE001
         logger.warning("scout fan-out failed: %s", e)
         print(
@@ -216,35 +306,76 @@ def discover_scene_prompts(
             f"falling back to safety net only",
             flush=True,
         )
-        per_batch = []
+        per_batch = [[] for _ in slices]
 
-    # Merge: preserve first-seen order across batches, dedupe case-insensitively.
-    seen: set[str] = set()
-    merged: list[str] = []
-    for batch in per_batch:
-        for phrase in batch:
+    # Track which slices each phrase appeared in (case-insensitive key,
+    # preserving the casing of the first occurrence).
+    first_casing: dict[str, str] = {}
+    phrase_to_slice_idxs: dict[str, list[int]] = {}
+    for batch_idx, batch_phrases in enumerate(per_batch):
+        for phrase in batch_phrases:
             key = phrase.lower().strip()
-            if key and key not in seen:
-                seen.add(key)
-                merged.append(phrase.strip())
+            if not key:
+                continue
+            if key not in first_casing:
+                first_casing[key] = phrase.strip()
+            phrase_to_slice_idxs.setdefault(key, []).append(batch_idx)
 
-    # Append safety net, then cap.
-    for phrase in _SAFETY_NET:
-        key = phrase.lower().strip()
-        if key not in seen:
-            seen.add(key)
-            merged.append(phrase)
+    # Build scoped prompts, range-unioned + padded, capped to MAX_SCOPED.
+    scoped: list[ScopedPrompt] = []
+    # Order phrases by first-appearance slice index, then by appearance count
+    # within that slice — keeps prominent objects ahead of long-tail filler.
+    keys_ordered = sorted(
+        phrase_to_slice_idxs.keys(),
+        key=lambda k: (min(phrase_to_slice_idxs[k]), -len(phrase_to_slice_idxs[k])),
+    )
+    for key in keys_ordered:
+        slice_idxs = phrase_to_slice_idxs[key]
+        union_start = min(slices[i][0] for i in slice_idxs)
+        union_end = max(slices[i][1] for i in slice_idxs)
+        padded_start = max(0, union_start - _RANGE_PADDING_FRAMES)
+        padded_end = min(n_total, union_end + _RANGE_PADDING_FRAMES)
+        scoped.append(
+            ScopedPrompt(
+                phrase=first_casing[key],
+                frame_range=(padded_start, padded_end),
+            )
+        )
 
-    if len(merged) > _MAX_PROMPTS:
+    if len(scoped) > _MAX_SCOPED_PROMPTS:
         print(
-            f"[scout] dedup yielded {len(merged)} phrases — capping at "
-            f"{_MAX_PROMPTS} (dropping lowest-prominence tail)",
+            f"[scout] dedup yielded {len(scoped)} scoped phrases — capping at "
+            f"{_MAX_SCOPED_PROMPTS} (dropping lowest-prominence tail)",
             flush=True,
         )
-        merged = merged[:_MAX_PROMPTS]
+        scoped = scoped[:_MAX_SCOPED_PROMPTS]
 
+    # Append safety-net phrases as global prompts (frame_range=None).
+    seen_keys = {p.phrase.lower().strip() for p in scoped}
+    for phrase in _GLOBAL_SAFETY_NET:
+        if phrase.lower().strip() not in seen_keys:
+            scoped.append(ScopedPrompt(phrase=phrase, frame_range=None))
+
+    n_scoped = sum(1 for p in scoped if p.frame_range is not None)
+    n_global = sum(1 for p in scoped if p.frame_range is None)
     print(
-        f"[scout] final SAM 3.1 prompt list ({len(merged)} phrases): {merged}",
+        f"[scout] final SAM 3.1 prompt list: {n_scoped} scoped + {n_global} global "
+        f"(total {len(scoped)})",
         flush=True,
     )
-    return merged
+    for p in scoped:
+        if p.frame_range is None:
+            print(f"[scout]   • '{p.phrase}' [global, all {n_total} frames]", flush=True)
+        else:
+            s, e = p.frame_range
+            print(f"[scout]   • '{p.phrase}' [{s}..{e}) ({e - s} frames)", flush=True)
+
+    # Persist for instant resume on retry. Keeps Stage 2/3 GPU iterations
+    # cheap if a downstream stage fails — scout never gets re-run.
+    try:
+        ckpt.write_text(json.dumps(_serialise(scoped), indent=2))
+        print(f"[scout] checkpoint → {ckpt.name}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not write %s: %s", ckpt.name, e)
+
+    return scoped

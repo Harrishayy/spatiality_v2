@@ -52,7 +52,6 @@ import {
 import type { Annotation, Vec3 } from "@/lib/types";
 import { useUI } from "@/store/ui";
 import { AnnotationOverlay } from "./AnnotationOverlay";
-import { CalibrateModal } from "./CalibrateModal";
 
 // "end_header\n" — used as a needle in the streaming parser to detect when the
 // PLY ASCII header is fully received and we can transition to body parsing.
@@ -746,6 +745,7 @@ export function SplatViewer({ splatUrl, annotations, emptySplat, wireframeUrl }:
   const setBounds = useUI((s) => s.setBounds);
   const selectedId = useUI((s) => s.selectedId);
   const renderMode = useUI((s) => s.renderMode);
+  const showAnnotations = useUI((s) => s.showAnnotations);
   const schematicMode = useUI((s) => s.schematicMode);
   const wireframeMode = useUI((s) => s.wireframeMode);
   const measureMode = useUI((s) => s.measureMode);
@@ -2190,11 +2190,13 @@ export function SplatViewer({ splatUrl, annotations, emptySplat, wireframeUrl }:
         ref={overlayRef}
         className="pointer-events-none absolute inset-0 overflow-hidden"
       >
-        <AnnotationOverlay
-          annotations={annotations}
-          getCamera={() => sceneRef.current.camera}
-          containerRef={overlayRef}
-        />
+        {showAnnotations && (
+          <AnnotationOverlay
+            annotations={annotations}
+            getCamera={() => sceneRef.current.camera}
+            containerRef={overlayRef}
+          />
+        )}
         <DimensionOverlay
           getCamera={() => sceneRef.current.camera}
           containerRef={overlayRef}
@@ -2232,24 +2234,12 @@ export function SplatViewer({ splatUrl, annotations, emptySplat, wireframeUrl }:
 function ViewerToolbar() {
   const renderMode = useUI((s) => s.renderMode);
   const cycleRenderMode = useUI((s) => s.cycleRenderMode);
-  const schematicMode = useUI((s) => s.schematicMode);
-  const toggleSchematic = useUI((s) => s.toggleSchematic);
-  const wireframeMode = useUI((s) => s.wireframeMode);
-  const toggleWireframe = useUI((s) => s.toggleWireframe);
-  const measureMode = useUI((s) => s.measureMode);
-  const toggleMeasureMode = useUI((s) => s.toggleMeasureMode);
-  const measurements = useUI((s) => s.measurements);
-  const pendingPoint = useUI((s) => s.pendingPoint);
-  const clearMeasurements = useUI((s) => s.clearMeasurements);
-  const cancelMeasurement = useUI((s) => s.cancelMeasurement);
-  const displayScale = useUI((s) => s.displayScale);
-  const setDisplayScale = useUI((s) => s.setDisplayScale);
+  const showAnnotations = useUI((s) => s.showAnnotations);
+  const toggleAnnotations = useUI((s) => s.toggleAnnotations);
   const modeLabel =
     renderMode === "depth" ? "Depth" : renderMode === "confidence" ? "Confidence" : "RGB";
 
-  const [calibrateOpen, setCalibrateOpen] = useState(false);
   return (
-    <>
     <div className="pointer-events-auto absolute left-1/2 top-3 flex -translate-x-1/2 gap-1.5">
       <button
         onClick={cycleRenderMode}
@@ -2259,77 +2249,17 @@ function ViewerToolbar() {
         Mode: <span className="text-accent-300">{modeLabel}</span>
       </button>
       <button
-        onClick={toggleSchematic}
+        onClick={toggleAnnotations}
         className={`rounded-md border px-2.5 py-1 font-mono text-[11px] backdrop-blur ${
-          schematicMode
+          showAnnotations
             ? "border-accent-400/80 bg-accent-500/15 text-accent-100"
             : "border-ink-700/70 bg-ink-900/85 text-ink-100 hover:border-accent-400/60 hover:text-accent-200"
         }`}
-        title="Overlay blueprint-style ground grid + cross-section frames"
+        title="Show/hide object markers and labels"
       >
-        {schematicMode ? "● Schematic" : "Schematic"}
+        {showAnnotations ? "● Annotations" : "Annotations"}
       </button>
-      <button
-        onClick={toggleWireframe}
-        className={`rounded-md border px-2.5 py-1 font-mono text-[11px] backdrop-blur ${
-          wireframeMode
-            ? "border-accent-400/80 bg-accent-500/15 text-accent-100"
-            : "border-ink-700/70 bg-ink-900/85 text-ink-100 hover:border-accent-400/60 hover:text-accent-200"
-        }`}
-        title="Hide the full cloud and show a reduced wireframe (segmentation-aware)"
-      >
-        {wireframeMode ? "● Wireframe" : "Wireframe"}
-      </button>
-      <button
-        onClick={() => {
-          if (pendingPoint) cancelMeasurement();
-          toggleMeasureMode();
-        }}
-        className={`rounded-md border px-2.5 py-1 font-mono text-[11px] backdrop-blur ${
-          measureMode
-            ? "border-yellow-300/80 bg-yellow-400/15 text-yellow-100"
-            : "border-ink-700/70 bg-ink-900/85 text-ink-100 hover:border-yellow-300/60 hover:text-yellow-200"
-        }`}
-        title="Click two points on the cloud to measure their metric distance"
-      >
-        {measureMode ? "● Measure" : "Measure"}
-      </button>
-      {measurements.length > 0 && (
-        <button
-          onClick={clearMeasurements}
-          className="rounded-md border border-ink-700/70 bg-ink-900/85 px-2 py-1 font-mono text-[11px] text-ink-300 backdrop-blur hover:border-red-400/60 hover:text-red-300"
-          title="Clear all measurements"
-        >
-          Clear ({measurements.length})
-        </button>
-      )}
-      <button
-        onClick={() => setCalibrateOpen(true)}
-        className={`rounded-md border px-2.5 py-1 font-mono text-[11px] backdrop-blur ${
-          displayScale !== 1
-            ? "border-emerald-400/60 bg-emerald-500/15 text-emerald-200"
-            : "border-ink-700/70 bg-ink-900/85 text-ink-100 hover:border-emerald-400/60 hover:text-emerald-200"
-        }`}
-        title={
-          displayScale !== 1
-            ? `Calibrated × ${displayScale.toFixed(3)} (click to recalibrate from latest measurement)`
-            : "Take a measurement on a known reference, then click here to calibrate"
-        }
-      >
-        {displayScale !== 1 ? `✓ ×${displayScale.toFixed(2)}` : "Calibrate"}
-      </button>
-      {displayScale !== 1 && (
-        <button
-          onClick={() => setDisplayScale(1)}
-          className="rounded-md border border-ink-700/70 bg-ink-900/85 px-2 py-1 font-mono text-[11px] text-ink-300 backdrop-blur hover:border-red-400/60 hover:text-red-300"
-          title="Reset calibration (back to raw VGGT units)"
-        >
-          ↺
-        </button>
-      )}
     </div>
-    <CalibrateModal open={calibrateOpen} onClose={() => setCalibrateOpen(false)} />
-    </>
   );
 }
 

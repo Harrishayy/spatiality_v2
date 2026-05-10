@@ -16,6 +16,8 @@ This module:
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -26,37 +28,94 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------- PLY loader
 
+# Per-process cache. Lane B fans out 16-way under asyncio.gather; without
+# this, every track independently re-reads + re-parses the entire 906 MB
+# points.ply from the Modal FUSE volume — 16× I/O contention + 14 GB of
+# redundant numpy buffers. Cache is keyed by resolved path. Modal containers
+# are single-process per scene, so a single entry per run is the norm; the
+# cache dies with the container.
+_PLY_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_PLY_CACHE_LOCK = threading.Lock()
+
+# Cap the cached cloud at this many points. Lane B/E's orbital + topdown +
+# closeup renders are the only callers of load_points_ply, and they need a
+# *visualisation* of the cloud — not full fidelity. Inference's default
+# target_count is 50M, which makes every per-track AABB filter (50M boolean
+# comparisons × 6 + 5 ANDs) take ~6 s on its own; with 44 sequential
+# closeups in Lane E that's ~5 min of pure CPU before any Gemini call fires.
+# 2M points preserves visual structure (typical indoor scene needs ≪1M for
+# a recognisable orbital render) and cuts every downstream op ~25×.
+# Deterministic seed so multiple processes / restarts produce identical
+# subsamples (helpful when comparing across runs). The on-disk PLY is
+# untouched — only this in-memory cached view is sub-sampled. The web UI's
+# splat viewer reads points.ply directly via FastAPI, not through this
+# cache, so it still gets full fidelity.
+_RENDER_MAX_POINTS = 2_000_000
+
 
 def load_points_ply(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Read our binary points.ply (xyz f32 + rgb u8 + confidence f32).
 
-    Returns (xyz Nx3 f32, rgb Nx3 u8, conf N f32).
-    """
-    with path.open("rb") as f:
-        header_lines: list[str] = []
-        while True:
-            line = f.readline().decode("ascii", errors="ignore")
-            header_lines.append(line)
-            if line.strip() == "end_header":
-                break
-        n = 0
-        for h in header_lines:
-            if h.startswith("element vertex"):
-                n = int(h.split()[-1])
-                break
-        dtype = np.dtype(
-            [
-                ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
-                ("r", "u1"), ("g", "u1"), ("b", "u1"),
-                ("c", "<f4"),
-            ]
-        )
-        rec = np.frombuffer(f.read(n * dtype.itemsize), dtype=dtype)
+    Returns (xyz Nx3 f32, rgb Nx3 u8, conf N f32). The result is cached
+    per-process keyed by resolved path; concurrent callers (Lane B's
+    asyncio.to_thread fan-out, Lane E's pair iteration) get the same arrays
+    back, so the heavy FUSE read happens at most once per scene.
 
-    xyz = np.stack([rec["x"], rec["y"], rec["z"]], axis=1).astype(np.float32)
-    rgb = np.stack([rec["r"], rec["g"], rec["b"]], axis=1).astype(np.uint8)
-    conf = rec["c"].astype(np.float32)
-    return xyz, rgb, conf
+    Returned arrays are shared across callers — treat as read-only. Existing
+    callers (render_track_orbit, lane_e._topdown_render, _track_closeup) only
+    read or fancy-index, so the contract is safe.
+    """
+    key = str(Path(path).resolve())
+    cached = _PLY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _PLY_CACHE_LOCK:
+        cached = _PLY_CACHE.get(key)  # re-check under lock; another thread may have populated
+        if cached is not None:
+            return cached
+        t0 = time.time()
+        with path.open("rb") as f:
+            header_lines: list[str] = []
+            while True:
+                line = f.readline().decode("ascii", errors="ignore")
+                header_lines.append(line)
+                if line.strip() == "end_header":
+                    break
+            n = 0
+            for h in header_lines:
+                if h.startswith("element vertex"):
+                    n = int(h.split()[-1])
+                    break
+            dtype = np.dtype(
+                [
+                    ("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+                    ("r", "u1"), ("g", "u1"), ("b", "u1"),
+                    ("c", "<f4"),
+                ]
+            )
+            rec = np.frombuffer(f.read(n * dtype.itemsize), dtype=dtype)
+
+        xyz = np.stack([rec["x"], rec["y"], rec["z"]], axis=1).astype(np.float32)
+        rgb = np.stack([rec["r"], rec["g"], rec["b"]], axis=1).astype(np.uint8)
+        conf = rec["c"].astype(np.float32)
+
+        n_full = len(xyz)
+        if n_full > _RENDER_MAX_POINTS:
+            idx = np.random.default_rng(0).choice(
+                n_full, size=_RENDER_MAX_POINTS, replace=False
+            )
+            xyz = xyz[idx]
+            rgb = rgb[idx]
+            conf = conf[idx]
+
+        _PLY_CACHE[key] = (xyz, rgb, conf)
+        size_mb = (xyz.nbytes + rgb.nbytes + conf.nbytes) / 1e6
+        suffix = (f" (sub-sampled from {n_full:,} for render)"
+                  if n_full > _RENDER_MAX_POINTS else "")
+        print(f"[render] loaded points.ply: {len(xyz):,} pts, {size_mb:.0f} MB "
+              f"in {time.time()-t0:.1f}s (cached for subsequent calls)"
+              f"{suffix}", flush=True)
+        return _PLY_CACHE[key]
 
 
 # ---------------------------------------------------------------------------- camera maths

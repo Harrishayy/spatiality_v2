@@ -27,11 +27,6 @@ export interface SceneBounds {
  *  - "confidence" : turbo-colormap by per-point VGGT confidence. */
 export type RenderMode = "rgb" | "depth" | "confidence";
 
-/** Pipeline stages the drill-down drawer can open into. Matches the
- *  stage keys on Manifest.stages; "splat" is intentionally absent because
- *  it's hidden in the UI (PipelineProgress.STAGE_ORDER). */
-export type DrillStage = "capture" | "poses" | "segmentation";
-
 /** A user-placed measurement: two world-space points and the measured
  *  distance in metres. Drawn as a line + label in the viewer. */
 export interface Measurement {
@@ -70,9 +65,10 @@ interface UIState {
    *  metres; this is what the Calibrate UX writes (real / measured) so
    *  every label reflects real-world units. 1.0 = uncalibrated. */
   displayScale: number;
-  /** Pipeline drill-down drawer — null when closed. */
-  openStage: DrillStage | null;
-  setOpenStage: (stage: DrillStage | null) => void;
+  /** When true, AnnotationOverlay (object markers + labels) is shown over
+   *  the 3D scene. Toggled via the "Annotations" button in the toolbar. */
+  showAnnotations: boolean;
+  toggleAnnotations: () => void;
   /** Active labeling lane — controls which annotations.*.json the viewer
    *  reads. "b" is the default VLM-verified labels lane. */
   lane: Lane;
@@ -114,8 +110,8 @@ export const useUI = create<UIState>((set) => ({
   measurements: [],
   pendingPoint: null,
   displayScale: 1,
-  openStage: null,
-  setOpenStage: (openStage) => set({ openStage }),
+  showAnnotations: true,
+  toggleAnnotations: () => set((s) => ({ showAnnotations: !s.showAnnotations })),
   lane: "b",
   setLane: (lane) => set({ lane }),
   setSelected: (id) => set({ selectedId: id }),

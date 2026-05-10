@@ -2,6 +2,7 @@ import type {
   Annotation,
   ChatMessage,
   CostAggregate,
+  DiscardedAnnotation,
   GatewayHealth,
   JobSettings,
   Lane,
@@ -88,6 +89,18 @@ export async function fetchLanePayload(
     edges: body.edges,
     layout: body.layout,
   };
+}
+
+/** Tracks that Lane B labelled but the postprocess dropped (or merged).
+ *  Returns [] if the artifact isn't present (older scenes pre-discarded
+ *  feature, or scenes where Lane B was skipped). */
+export async function fetchDiscardedAnnotations(
+  sceneId: string,
+): Promise<DiscardedAnnotation[]> {
+  const res = await fetch(getArtifactUrl(sceneId, "annotations.b.discarded.json"));
+  if (!res.ok) return [];
+  const body = await res.json();
+  return Array.isArray(body) ? (body as DiscardedAnnotation[]) : [];
 }
 
 export async function fetchAnnotations(

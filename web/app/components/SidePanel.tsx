@@ -1,11 +1,17 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
-import type { Annotation, Manifest, StageStatus } from "@/lib/types";
+import type {
+  Annotation,
+  DiscardReason,
+  DiscardStage,
+  DiscardedAnnotation,
+  Manifest,
+  StageStatus,
+} from "@/lib/types";
 import { useUI } from "@/store/ui";
 import { AnnotationEvidencePanel } from "./AnnotationEvidencePanel";
-import { ChatPanel } from "./ChatPanel";
 import { PipelineProgress } from "./PipelineProgress";
 
 export type SceneSection = "pipeline" | "objects" | "evidence";
@@ -22,16 +28,16 @@ interface ColumnProps {
 
 /**
  * Right-side column on the scenes page: a vertical icon rail (Pipeline /
- * Objects / Evidence) plus the persistent chat panel. The actual section
- * content renders in a separate <SceneDrawerOverlay> that floats over the
- * 3D canvas — this column is what stays put.
+ * Objects / Evidence). The actual section content renders in a separate
+ * <SceneDrawerOverlay> that floats over the 3D canvas — this column is
+ * what stays put.
  */
 export function SceneSideColumn({
-  manifest,
+  manifest: _manifest,
   annotations,
-  messages,
-  onSend,
-  loading,
+  messages: _messages,
+  onSend: _onSend,
+  loading: _loading,
   openSection,
   onToggleSection,
 }: ColumnProps) {
@@ -63,22 +69,6 @@ export function SceneSideColumn({
           onClick={() => onToggleSection("evidence")}
         />
       </div>
-
-      <div className="lp-chat-column">
-        <div className="lp-chat-column-head">
-          <span className="lp-chat-column-title">
-            Chat <em>ask the scene</em>
-          </span>
-        </div>
-        <div className="lp-chat-column-body">
-          <ChatPanel
-            sceneId={manifest.scene_id}
-            messages={messages}
-            onSend={onSend}
-            disabled={loading}
-          />
-        </div>
-      </div>
     </aside>
   );
 }
@@ -86,6 +76,7 @@ export function SceneSideColumn({
 interface DrawerProps {
   manifest: Manifest;
   annotations: Annotation[];
+  discarded: DiscardedAnnotation[];
   segStatus: StageStatus;
   openSection: SceneSection | null;
   onClose: () => void;
@@ -99,6 +90,7 @@ interface DrawerProps {
 export function SceneDrawerOverlay({
   manifest,
   annotations,
+  discarded,
   segStatus,
   openSection,
   onClose,
@@ -124,7 +116,11 @@ export function SceneDrawerOverlay({
   } else if (openSection === "objects") {
     body = (
       <>
-        <ObjectsList annotations={annotations} segStatus={segStatus} />
+        <ObjectsTabs
+          annotations={annotations}
+          discarded={discarded}
+          segStatus={segStatus}
+        />
         {isolatedIds.size > 0 && (
           <button
             onClick={clearIsolated}
@@ -293,6 +289,170 @@ function ObjectsList({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+const DISCARD_REASON_LABEL: Record<DiscardReason, string> = {
+  short_tracklet: "short tracklet",
+  multiview_filter: "multi-view inconsistent",
+  "3d_coherence": "3D incoherent",
+  reprojection: "reprojection failed",
+  merged_3d: "merged in 3D",
+  scene_label: "scene label",
+  low_confidence: "low confidence",
+  oversize: "oversize",
+  merged_duplicate: "merged duplicate",
+};
+
+const STAGE_LABEL: Record<DiscardStage, string> = {
+  gdino: "Detection",
+  lift: "3D Lift",
+  postprocess: "Postprocess",
+};
+
+const STAGE_BLURB: Record<DiscardStage, string> = {
+  gdino: "Cut after Grounding-DINO + IoU tracklets — too few frames to trust.",
+  lift: "Cut during 3D lifting — geometry rejected the track.",
+  postprocess: "Cut after VLM labelling — unsupported label, low confidence, or duplicate.",
+};
+
+const STAGE_ORDER: DiscardStage[] = ["gdino", "lift", "postprocess"];
+
+type ObjectsTab = "confirmed" | "discarded";
+
+function ObjectsTabs({
+  annotations,
+  discarded,
+  segStatus,
+}: {
+  annotations: Annotation[];
+  discarded: DiscardedAnnotation[];
+  segStatus: StageStatus;
+}) {
+  const [tab, setTab] = useState<ObjectsTab>("confirmed");
+  return (
+    <div className="lp-objects-tabs">
+      <div className="lp-objects-tabbar" role="tablist" aria-label="Objects">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "confirmed"}
+          className={[
+            "lp-objects-tab",
+            tab === "confirmed" ? "lp-objects-tab--on" : "",
+          ].join(" ")}
+          onClick={() => setTab("confirmed")}
+        >
+          Confirmed
+          <span className="lp-objects-tab-count">{annotations.length}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "discarded"}
+          className={[
+            "lp-objects-tab",
+            tab === "discarded" ? "lp-objects-tab--on" : "",
+          ].join(" ")}
+          onClick={() => setTab("discarded")}
+        >
+          Discarded
+          <span className="lp-objects-tab-count">{discarded.length}</span>
+        </button>
+      </div>
+      {tab === "confirmed" ? (
+        <ObjectsList annotations={annotations} segStatus={segStatus} />
+      ) : (
+        <DiscardedList discarded={discarded} segStatus={segStatus} />
+      )}
+    </div>
+  );
+}
+
+function DiscardedList({
+  discarded,
+  segStatus,
+}: {
+  discarded: DiscardedAnnotation[];
+  segStatus: StageStatus;
+}) {
+  if (discarded.length === 0) {
+    let label: string;
+    if (segStatus === "running") label = "Segmenting…";
+    else if (segStatus === "pending") label = "Segmentation pending.";
+    else if (segStatus === "failed") label = "Segmentation failed.";
+    else label = "Nothing was discarded.";
+    return (
+      <div className="lp-objects-empty">
+        {segStatus === "running" && (
+          <span className="lp-status-dot lp-status-dot--warn" />
+        )}
+        <span>{label}</span>
+      </div>
+    );
+  }
+
+  const byStage = new Map<DiscardStage, DiscardedAnnotation[]>();
+  for (const a of discarded) {
+    const arr = byStage.get(a.stage) ?? [];
+    arr.push(a);
+    byStage.set(a.stage, arr);
+  }
+
+  return (
+    <div className="lp-objects-discarded">
+      {STAGE_ORDER.map((stage) => {
+        const items = byStage.get(stage);
+        if (!items || items.length === 0) return null;
+        return (
+          <section key={stage} className="lp-objects-discarded-section">
+            <header className="lp-objects-discarded-section-head">
+              <span className="lp-objects-discarded-section-name">
+                {STAGE_LABEL[stage]}
+              </span>
+              <span className="lp-objects-discarded-section-count">
+                {items.length}
+              </span>
+            </header>
+            <p className="lp-objects-discarded-section-blurb">
+              {STAGE_BLURB[stage]}
+            </p>
+            <div className="lp-objects-list">
+              {items.map((a) => (
+                <DiscardedRow key={a.id} a={a} />
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function DiscardedRow({ a }: { a: DiscardedAnnotation }) {
+  const reason = DISCARD_REASON_LABEL[a.discard_reason] ?? a.discard_reason;
+  const conf = a.confidence != null ? `${(a.confidence * 100).toFixed(0)}%` : null;
+  const frames = a.n_frames ?? a.frame_ids?.length ?? null;
+  return (
+    <div
+      className="lp-objects-row lp-objects-row--discarded"
+      title={a.discard_detail ?? ""}
+    >
+      <span
+        className="lp-objects-dot"
+        style={{ backgroundColor: a.color ?? "#555", opacity: 0.5 }}
+      />
+      <div className="lp-objects-discarded-meta">
+        <span className="lp-objects-label">{a.label || "unknown"}</span>
+        <span className="lp-objects-discarded-reason">{reason}</span>
+        {a.discard_detail && (
+          <span className="lp-objects-discarded-detail">{a.discard_detail}</span>
+        )}
+      </div>
+      <span className="lp-objects-conf">
+        {conf ?? (frames != null ? `${frames}f` : "—")}
+      </span>
     </div>
   );
 }

@@ -22,7 +22,7 @@ Schema mirror lives at [`app/lib/types.ts`](./app/lib/types.ts) — keep in sync
 
 ## Run locally
 
-The web app expects the agent backend running at `http://localhost:8000`. Next rewrites `/api/*` and `/artifacts/*` to that origin.
+The web app expects the agent backend running at `http://localhost:8765`. Next rewrites `/api/*` and `/artifacts/*` to that origin.
 
 ```
 pnpm install

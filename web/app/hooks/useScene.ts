@@ -1,7 +1,22 @@
 import { useQuery } from "@tanstack/react-query";
-import { fetchLanePayload, fetchManifest, fetchPointsUrl, HttpError } from "@/lib/api";
+import {
+  fetchDiscardedAnnotations,
+  fetchLanePayload,
+  fetchManifest,
+  fetchPointsUrl,
+  HttpError,
+} from "@/lib/api";
 import { useUI } from "@/store/ui";
-import type { Annotation, BBox, LanePayload, Lane, SceneEdge, SpatialLayout, Vec3 } from "@/lib/types";
+import type {
+  Annotation,
+  BBox,
+  DiscardedAnnotation,
+  LanePayload,
+  Lane,
+  SceneEdge,
+  SpatialLayout,
+  Vec3,
+} from "@/lib/types";
 
 const POLL_MS = 2000;
 
@@ -96,9 +111,29 @@ export function useScene(sceneId: string) {
     enabled: splatReady,
   });
 
+  // Postprocess-dropped Lane B tracks (scene labels, low-conf, oversize,
+  // duplicates). Same y/z flip as the kept annotations so any future viewer
+  // overlay using the centroid lines up.
+  const discarded = useQuery({
+    queryKey: ["discarded", sceneId],
+    queryFn: async (): Promise<DiscardedAnnotation[]> => {
+      const raw = await fetchDiscardedAnnotations(sceneId);
+      // Only postprocess-stage discards carry geometry; upstream stages
+      // (gdino, lift) drop before the centroid/bbox exist, so leave those
+      // untouched rather than flipping undefined values.
+      return raw.map((a) => ({
+        ...a,
+        centroid: a.centroid ? flipPoint(a.centroid) : undefined,
+        bbox: a.bbox ? flipBBox(a.bbox) : undefined,
+      }));
+    },
+    enabled: segReady,
+  });
+
   return {
     manifest,
     annotations,
+    discarded,
     edges,
     layout,
     splatUrl,

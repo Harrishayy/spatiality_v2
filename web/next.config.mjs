@@ -16,10 +16,10 @@ const nextConfig = {
   },
 
   async rewrites() {
-    // The local backend is `uvicorn backend.main:app --port 8000` from the
+    // The local backend is `uvicorn backend.main:app --port 8765` from the
     // repo root. Override with SPATIALITY_API_URL only if you've actually
     // moved it elsewhere — e.g. a tunnel for someone testing remotely.
-    const backend = process.env.SPATIALITY_API_URL ?? "http://localhost:8000";
+    const backend = process.env.SPATIALITY_API_URL ?? "http://localhost:8765";
     return [
       { source: "/api/:path*", destination: `${backend}/api/:path*` },
       { source: "/artifacts/:path*", destination: `${backend}/artifacts/:path*` },

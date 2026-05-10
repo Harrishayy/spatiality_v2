@@ -22,7 +22,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FrameResult:
-    """Per-frame outputs from VGGT/FlashVGGT inference."""
+    """Per-frame outputs from VGGT/FlashVGGT inference.
+
+    The optional ``world_points`` and ``world_points_conf`` fields carry
+    VGGT's point-head output (per-pixel world XYZ + confidence). They're
+    additive over the pre-existing depth + camera path: when present,
+    Stage 3's lift can use them directly instead of re-deriving via manual
+    unprojection. When ``None`` (older inference runs, or VGGT variants
+    without the point head exposed), Stage 3 falls back transparently.
+    """
 
     frame_id: str
     depth: np.ndarray          # (H, W) float32, metres in arbitrary scale
@@ -31,6 +39,8 @@ class FrameResult:
     R: np.ndarray              # (3, 3) extrinsics rotation, world→cam
     t: np.ndarray              # (3,)   extrinsics translation, world→cam
     image_rgb: np.ndarray      # (H, W, 3) uint8
+    world_points: np.ndarray | None = None       # (H, W, 3) float16, optional
+    world_points_conf: np.ndarray | None = None  # (H, W) float16, optional
 
 
 def _try_load_flashvggt() -> tuple[object, str] | None:
@@ -319,6 +329,30 @@ def run_inference(
     print(f"[inference] post-squeeze: depth {depth.shape}, depth_conf "
           f"{depth_conf.shape}, pose_enc {tuple(pose_enc.shape)}", flush=True)
 
+    # Optional: extract VGGT's point-head outputs. These are per-pixel
+    # world-space (X, Y, Z) and a separate confidence in the *3D position*
+    # (distinct from depth_conf, which is confidence in the scalar depth).
+    # Both heads always run during a forward pass; this code just preserves
+    # them so Stage 3 can avoid re-deriving XYZ via manual unprojection.
+    # Cast to float16 — XYZ at metre precision doesn't need float32.
+    world_points_all: np.ndarray | None = None
+    world_points_conf_all: np.ndarray | None = None
+    try:
+        if "world_points" in preds:
+            wp = preds["world_points"].squeeze(0)  # (N, H, W, 3)
+            world_points_all = wp.detach().cpu().numpy().astype(np.float16)
+        if "world_points_conf" in preds:
+            wpc = preds["world_points_conf"].squeeze(0)  # (N, H, W)
+            world_points_conf_all = wpc.detach().cpu().numpy().astype(np.float16)
+        if world_points_all is not None:
+            print(f"[inference] world_points captured: {world_points_all.shape} "
+                  f"({world_points_all.nbytes / 1e6:.0f} MB total)", flush=True)
+    except Exception as e:  # noqa: BLE001
+        # Optional path — never let this break the main pipeline.
+        logger.warning("could not extract world_points: %s", e)
+        world_points_all = None
+        world_points_conf_all = None
+
     # Decode K, R, t using the model's actual input resolution (final_h, final_w).
     # In crop mode, all frames share the same (final_h, final_w) — read it from
     # the input tensor we just preprocessed.
@@ -353,6 +387,33 @@ def run_inference(
         d = _resize_to(depth_model, (band_h, W_orig))
         c = _resize_to(conf_model, (band_h, W_orig))
 
+        # Resize world_points / world_points_conf if extracted. We resize
+        # each XYZ channel independently using the same path as depth so
+        # the geometry stays consistent with the model's native output.
+        wp_band: np.ndarray | None = None
+        wpc_band: np.ndarray | None = None
+        if world_points_all is not None:
+            try:
+                wp_model = world_points_all[i]  # (H, W, 3) float16
+                # _resize_to operates on 2D — resize each channel.
+                wp_band = np.stack([
+                    _resize_to(wp_model[..., k].astype(np.float32),
+                               (band_h, W_orig)).astype(np.float16)
+                    for k in range(3)
+                ], axis=-1)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("world_points resize failed for frame %s: %s", path.stem, e)
+                wp_band = None
+        if world_points_conf_all is not None:
+            try:
+                wpc_band = _resize_to(
+                    world_points_conf_all[i].astype(np.float32),
+                    (band_h, W_orig),
+                ).astype(np.float16)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("world_points_conf resize failed for frame %s: %s", path.stem, e)
+                wpc_band = None
+
         # Scale K from (model_h, model_w) coords to (band_h, W_orig) coords.
         # No pad offset to subtract — crop mode never pads.
         K = K_all[i].copy()
@@ -370,6 +431,8 @@ def run_inference(
                 R=R_all[i].astype(np.float32),
                 t=t_all[i].astype(np.float32),
                 image_rgb=rgb_band,  # only the band the model actually saw
+                world_points=wp_band,
+                world_points_conf=wpc_band,
             )
         )
 

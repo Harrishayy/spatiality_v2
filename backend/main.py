@@ -8,7 +8,7 @@ Modal, invoked cross-app via ``Function.from_name(...).remote(...)``.
 
 URL shapes are unchanged from the old Modal API, so the existing Next.js
 client in ``web/app/lib/api.ts`` works as-is once
-``next.config.mjs`` rewrites point at ``http://localhost:8000``.
+``next.config.mjs`` rewrites point at ``http://localhost:8765``.
 
 Layout on disk (sibling to this file):
 
@@ -21,7 +21,7 @@ Layout on disk (sibling to this file):
             points.ply, frames/, masks/, annotations.*.json, …
 
 Run:
-    uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload
 """
 
 from __future__ import annotations

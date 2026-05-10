@@ -1,13 +1,15 @@
 "use client";
 
 import type { Manifest, Stage, StageStatus } from "@/lib/types";
-import { useUI, type DrillStage } from "@/store/ui";
+import { useUI } from "@/store/ui";
+
+type VisibleStage = "capture" | "poses" | "segmentation";
 
 // Visible stages in the panel. The internal "splat" stage (voxel-downsample
 // of VGGT surfels into the small splat.ply that segmentation clusters over)
 // is hidden — the viewer doesn't render that output and it's confusing to
 // surface to a user. Pipeline manifest still tracks it; we just don't show it.
-const STAGE_ORDER: DrillStage[] = ["capture", "poses", "segmentation"];
+const STAGE_ORDER: VisibleStage[] = ["capture", "poses", "segmentation"];
 
 const LABEL: Record<keyof Manifest["stages"], string> = {
   capture: "Capture",
@@ -24,7 +26,6 @@ function formatPointCount(n: number): string {
 
 export function PipelineProgress({ manifest }: { manifest: Manifest }) {
   const cloudStats = useUI((s) => s.cloudStats);
-  const setOpenStage = useUI((s) => s.setOpenStage);
   return (
     <div className="flex flex-col gap-3">
       <div className="lp-card">
@@ -40,19 +41,13 @@ export function PipelineProgress({ manifest }: { manifest: Manifest }) {
             const stage = manifest.stages[key];
             return (
               <li key={key}>
-                <button
-                  type="button"
-                  onClick={() => setOpenStage(key)}
-                  className="lp-stage-row lp-stage-row--btn"
-                  title="View live trace for this stage"
-                >
+                <div className="lp-stage-row">
                   <StageDot status={stage.status} />
                   <div className="lp-stage-meta">
                     <span className="lp-stage-label">{LABEL[key]}</span>
-                    <span className="lp-stage-trace">view trace ↗</span>
                   </div>
                   <DurationOrExtra stage={stage} />
-                </button>
+                </div>
               </li>
             );
           })}

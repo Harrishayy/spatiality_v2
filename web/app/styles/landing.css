@@ -1941,7 +1941,8 @@ button { font: inherit; }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 220px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding-right: 2px;
 }
@@ -2023,6 +2024,132 @@ button { font: inherit; }
   border: 1px dashed var(--ink-800);
   border-radius: 8px;
   font-size: 12px;
+  color: var(--ink-500);
+  font-style: italic;
+}
+
+/* Objects panel — Confirmed / Discarded tabs */
+.lp-objects-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lp-objects-tabbar {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--ink-800);
+  border-radius: 999px;
+  background: rgba(17,9,14,0.55);
+}
+.lp-objects-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-400);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.lp-objects-tab:hover {
+  color: var(--ink-200);
+}
+.lp-objects-tab--on {
+  background: rgba(255,107,74,0.16);
+  color: var(--ink-100);
+  box-shadow: inset 0 0 0 1px rgba(255,157,111,0.35);
+}
+.lp-objects-tab-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--ink-500);
+  background: rgba(255,255,255,0.04);
+  border-radius: 999px;
+  padding: 1px 6px;
+  min-width: 18px;
+  text-align: center;
+}
+.lp-objects-tab--on .lp-objects-tab-count {
+  color: var(--accent-300);
+  background: rgba(255,157,111,0.14);
+}
+
+.lp-objects-row--discarded {
+  cursor: default;
+  opacity: 0.78;
+}
+.lp-objects-row--discarded:hover {
+  background: rgba(255,255,255,0.02);
+}
+.lp-objects-discarded-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.lp-objects-discarded-reason {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-500);
+}
+.lp-objects-discarded-detail {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--ink-400);
+  margin-top: 2px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.lp-objects-discarded {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.lp-objects-discarded-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lp-objects-discarded-section-head {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0 2px;
+  border-bottom: 1px solid var(--ink-800);
+}
+.lp-objects-discarded-section-name {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 13.5px;
+  letter-spacing: -0.005em;
+  color: var(--ink-100);
+}
+.lp-objects-discarded-section-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--accent-300);
+  background: rgba(255,157,111,0.14);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+.lp-objects-discarded-section-blurb {
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  line-height: 1.4;
   color: var(--ink-500);
   font-style: italic;
 }
@@ -2279,6 +2406,100 @@ button { font: inherit; }
   pointer-events: none;
   mix-blend-mode: screen;
   opacity: 0.85;
+}
+
+/* Evidence lightbox — fullscreen overlay, portaled to document.body so it
+   escapes the drawer's transform context. Click backdrop / × / Esc to close. */
+.lp-evidence-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(8,4,6,0.88);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 32px 24px;
+  animation: lp-modal-fade 160ms ease-out;
+  cursor: zoom-out;
+}
+.lp-evidence-lightbox-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  max-height: 100%;
+  cursor: default;
+  animation: lp-modal-rise 220ms cubic-bezier(0.22, 0.85, 0.3, 1);
+}
+.lp-evidence-lightbox-frame {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: calc(100vh - 120px);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow:
+    0 40px 120px -30px rgba(0,0,0,0.85),
+    0 0 0 1px rgba(255,157,111,0.18) inset,
+    0 0 80px -30px rgba(255,107,74,0.35);
+}
+.lp-evidence-lightbox-img {
+  display: block;
+  max-width: calc(100vw - 64px);
+  max-height: calc(100vh - 120px);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+.lp-evidence-lightbox-caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 14px;
+  padding: 0 8px;
+}
+.lp-evidence-lightbox-label {
+  font-family: var(--serif);
+  font-size: 16px;
+  letter-spacing: -0.01em;
+  color: var(--ink-100);
+}
+.lp-evidence-lightbox-frameid {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-400);
+}
+.lp-evidence-lightbox-close {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 2;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ink-800);
+  border-radius: 999px;
+  background: rgba(10,5,8,0.65);
+  color: var(--ink-100);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.lp-evidence-lightbox-close:hover {
+  background: rgba(255,107,74,0.18);
+  border-color: rgba(255,157,111,0.45);
+  color: #fff;
 }
 
 /* ─── banner close button (dismissible canvas overlays) ─────── */

@@ -14,6 +14,47 @@ export interface Annotation {
   frame_ids?: string[];
 }
 
+/** Pipeline stage that produced a discard record. */
+export type DiscardStage = "gdino" | "lift" | "postprocess";
+
+/** Reasons a track can be cut. The set is a flat union across stages —
+ *  `stage` plus `discard_reason` together identifies the cause. */
+export type DiscardReason =
+  // GDINO (Stage 2 — detection + IoU tracklets)
+  | "short_tracklet"
+  // 3D lift (Stage 3)
+  | "multiview_filter"
+  | "3d_coherence"
+  | "reprojection"
+  | "merged_3d"
+  // Lane B postprocess (Stage 4B cleanup)
+  | "scene_label"
+  | "low_confidence"
+  | "oversize"
+  | "merged_duplicate";
+
+/** A track the pipeline considered but dropped at some stage. Geometry
+ *  fields are optional — only postprocess-stage discards (which made it
+ *  through 3D lift + Lane B labelling) carry a centroid/bbox/color. */
+export interface DiscardedAnnotation {
+  id: string;
+  label: string;
+  stage: DiscardStage;
+  discard_reason: DiscardReason;
+  discard_detail?: string;
+  // Postprocess-stage extras — present when the track was lifted.
+  centroid?: Vec3;
+  bbox?: BBox;
+  color?: string;
+  confidence?: number;
+  alternatives?: string[];
+  frame_ids?: string[];
+  merged_into?: string;
+  // Earlier-stage extras.
+  n_frames?: number;
+  source?: string;
+}
+
 /** Which labeling lane the user is currently viewing.
  *  - "b": VLM-verified labels (Claude over orbital novel-view renders).
  *  - "e": ConceptGraphs-style scene graph (objects + relationship edges).

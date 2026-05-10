@@ -192,15 +192,35 @@ def run_inference_one(input_id: str, **kwargs) -> dict:
 _LOCAL_OUTPUTS_ROOT = REPO / "backend" / "data" / "outputs"
 
 
-def _pull_outputs_to_local(input_id: str) -> int:
-    """Stream every file under `/<input_id>/` on the outputs volume into
-    backend/data/outputs/<input_id>/. Returns count of files written.
+def _fresh_local_dir(input_id: str) -> Path:
+    """Return a brand-new local sibling directory for this run's pull.
 
-    Mirror of `backend.main._pull_outputs_from_modal` — duplicated here so the
-    Modal local_entrypoint stays self-contained (no FastAPI import).
+    Format: ``backend/data/outputs/<input_id>_<YYYY-MM-DD_HH-MM-SS>/``.
+    Each pull creates its own dir so prior data is never touched.
     """
-    dst_root = _LOCAL_OUTPUTS_ROOT / input_id
-    dst_root.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    candidate = _LOCAL_OUTPUTS_ROOT / f"{input_id}_{stamp}"
+    suffix = 1
+    while candidate.exists():
+        candidate = _LOCAL_OUTPUTS_ROOT / f"{input_id}_{stamp}_{suffix}"
+        suffix += 1
+    candidate.mkdir(parents=True)
+    return candidate
+
+
+def _pull_outputs_to_local(input_id: str) -> int:
+    """Stream every file under `/<input_id>/` on the outputs volume into a
+    fresh sibling local directory. Returns count of files written.
+
+    Each pull lands in
+    ``backend/data/outputs/<input_id>_<timestamp>/`` so prior runs at
+    ``<input_id>/`` (or earlier timestamped dirs) are never overwritten.
+
+    Mirror of `backend.main._pull_outputs_from_modal` — duplicated here
+    so the Modal local_entrypoint stays self-contained.
+    """
+    dst_root = _fresh_local_dir(input_id)
 
     def _walk(remote_dir: str):
         for entry in outputs_vol.iterdir(remote_dir):

@@ -74,6 +74,11 @@ export function SceneSideColumn({
 }
 
 interface DrawerProps {
+  // URL-param scene id — source of truth for artifact paths. Don't fall
+  // back to manifest.scene_id: renamed/imported scenes (e.g. demo_piece)
+  // keep the original Modal job id in their manifest, so trusting it
+  // routes evidence URLs to a stale, nonexistent directory.
+  sceneId: string;
   manifest: Manifest;
   annotations: Annotation[];
   discarded: DiscardedAnnotation[];
@@ -88,6 +93,7 @@ interface DrawerProps {
  * over the 3D viewer; chat stays untouched in the persistent column.
  */
 export function SceneDrawerOverlay({
+  sceneId,
   manifest,
   annotations,
   discarded,
@@ -134,7 +140,7 @@ export function SceneDrawerOverlay({
   } else if (openSection === "evidence" && selected) {
     body = (
       <AnnotationEvidencePanel
-        sceneId={manifest.scene_id}
+        sceneId={sceneId}
         annotation={selected}
       />
     );

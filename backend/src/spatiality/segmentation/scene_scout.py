@@ -56,9 +56,9 @@ logger = logging.getLogger(__name__)
 # scales sub-linearly in the text encoder — wall-clock cost is negligible.
 _GLOBAL_SAFETY_NET: list[str] = [
     "door",
-    "wardrobe",
+    "clothes rack",
     "closet",
-    "remote control",
+    "laundry bag",
     "ceiling light",
 ]
 
@@ -71,12 +71,12 @@ _TARGET_N_SLICES = 20
 # Don't slice below this — tiny slices give Gemini too little context.
 _MIN_FRAMES_PER_SLICE = 8
 
-# Open-vocab discovery cap. 65 scoped phrases + global safety net keeps
+# Open-vocab discovery cap. 70 scoped phrases + global safety net keeps
 # the joined dot-separated GDINO text query comfortably under the 256-token
 # BERT cap that the GDINO text branch enforces. The closed-class safety
 # net above operates orthogonally to this cap, so the lower-bound on
 # coverage is the safety-net length even if scout discovers nothing.
-_MAX_SCOPED_PROMPTS = 65
+_MAX_SCOPED_PROMPTS = 70
 
 # How many evenly-spaced frames each batch sends to Gemini. 6 is the
 # Flash legibility sweet spot: more than that and the model starts merging

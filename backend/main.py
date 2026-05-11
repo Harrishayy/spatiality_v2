@@ -87,6 +87,20 @@ def _safe_artifact_path(scene_id: str, rel_path: str) -> Path:
     return target
 
 
+def _evidence_frame_fallback(scene_id: str, rel_path: str) -> Path | None:
+    # Map `evidence/<annotation_id>/<stem>.<ext>` → `frames/<stem>.<png|jpg>`.
+    parts = rel_path.split("/")
+    if len(parts) != 3 or parts[0] != "evidence":
+        return None
+    stem = Path(parts[2]).stem
+    frames_dir = _scene_output_dir(scene_id) / "frames"
+    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+        cand = frames_dir / f"{stem}{ext}"
+        if cand.is_file():
+            return cand
+    return None
+
+
 def _ffprobe_duration_seconds(video: Path) -> float:
     out = subprocess.check_output(
         [
@@ -624,8 +638,17 @@ def get_artifact(scene_id: str, rel_path: str):
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     if not target.exists() or not target.is_file():
-        raise HTTPException(404, f"artifact not found: {rel_path}")
+        # Pre-evidence-crop scenes (e.g. demo_piece) only kept full source
+        # frames under frames/<stem>.png. Fall back so the evidence panel
+        # still has something to render for the demo scene.
+        fallback = _evidence_frame_fallback(scene_id, rel_path)
+        if fallback is not None:
+            target = fallback
+        else:
+            raise HTTPException(404, f"artifact not found: {rel_path}")
 
+    # target.suffix (not rel_path) handles the fallback case where the
+    # browser asked for .jpg but we're serving the source frame .png.
     media_type = _MEDIA_TYPES.get(target.suffix.lower(), "application/octet-stream")
     size = target.stat().st_size
 

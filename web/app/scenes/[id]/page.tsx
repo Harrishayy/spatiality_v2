@@ -87,6 +87,7 @@ export default function ScenePage() {
 
           {m && (
             <SceneDrawerOverlay
+              sceneId={sceneId}
               manifest={m}
               annotations={annos}
               discarded={discardedAnnos}

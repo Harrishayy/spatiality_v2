@@ -27,12 +27,6 @@ interface UIState {
    *  rendered (parsed from the streaming points.ply). */
   cloudStats: CloudStats | null;
   renderMode: RenderMode;
-  /** When true, the viewer hides the full point cloud and renders a
-   *  reduced wireframe (voxel-downsampled background + per-object dense
-   *  points connected by kNN edges, monochrome, with floating labels at
-   *  annotation centroids). The full cloud's GPU buffers stay resident
-   *  so toggling back is instant. */
-  wireframeMode: boolean;
   /** When true, AnnotationOverlay (object markers + labels) is shown over
    *  the 3D scene. Toggled via the "Annotations" button in the toolbar. */
   showAnnotations: boolean;
@@ -48,7 +42,6 @@ interface UIState {
   setCloudStats: (stats: CloudStats | null) => void;
   setRenderMode: (mode: RenderMode) => void;
   cycleRenderMode: () => void;
-  toggleWireframe: () => void;
 }
 
 const RENDER_MODE_ORDER: RenderMode[] = ["rgb", "depth", "confidence"];
@@ -59,7 +52,6 @@ export const useUI = create<UIState>((set) => ({
   camera: { position: [0, 0, 0], direction: [0, 0, -1] },
   cloudStats: null,
   renderMode: "rgb",
-  wireframeMode: false,
   showAnnotations: true,
   toggleAnnotations: () => set((s) => ({ showAnnotations: !s.showAnnotations })),
   lane: "b",
@@ -84,5 +76,4 @@ export const useUI = create<UIState>((set) => ({
           (RENDER_MODE_ORDER.indexOf(s.renderMode) + 1) % RENDER_MODE_ORDER.length
         ],
     })),
-  toggleWireframe: () => set((s) => ({ wireframeMode: !s.wireframeMode })),
 }));

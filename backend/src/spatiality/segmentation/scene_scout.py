@@ -1,24 +1,20 @@
 """VLM scene scout — discover what's in each temporal slice of the video.
 
-Replaces the static 40-phrase vocabulary that used to drive SAM 3.1's
-open-vocabulary detector with a per-scene, per-slice list discovered by
-Gemini 2.5 Flash. The scout chops the timeline into ~20 temporal slices,
-fires one Flash call per slice in parallel (asyncio.gather), then returns
-each phrase tagged with the frame range it was discovered in so SAM 3.1
-can propagate that phrase only over the relevant frames instead of the
+Replaces the static 40-phrase vocabulary that used to drive open-vocab
+detection with a per-scene, per-slice list discovered by Gemini 2.5
+Flash. The scout chops the timeline into ~20 temporal slices, fires one
+Flash call per slice in parallel (asyncio.gather), then returns each
+phrase tagged with the frame range it was discovered in so the GDINO
+sweep only fires that phrase over the relevant frames instead of the
 whole video.
 
 Why per-slice scoping matters:
-  - SAM 3.1 wall-clock is dominated by `propagate_in_video`, which runs
-    the full attention pipeline once per frame in the session.
-  - Today: every scout phrase, whether seen in slice 1 or slice 17,
-    propagates across all 573 frames → one full-video pass per phrase.
-  - With per-slice scoping: a phrase from slice 5 only propagates over
-    that slice's frames (+ padding) → ~10× fewer frame-iterations on
-    average.
-  - When the same phrase appears in multiple slices, we union the slice
-    ranges so SAM 3.1 keeps a single track with stable identity across
-    those slices (avoids cross-track stitching for the easy case).
+  - GDINO runs once per frame in a dot-separated multi-phrase query;
+    keeping each phrase's frame range tight lets the downstream scope
+    filter discard out-of-window detections without re-running GDINO.
+  - When the same phrase appears in multiple slices we union the slice
+    ranges so the linker keeps a single track with stable identity
+    across those slices (avoids cross-track stitching for the easy case).
 
 Why a tiny global safety net is still useful:
   - "person" is universal — humans walk through scenes briefly enough
@@ -75,12 +71,12 @@ _TARGET_N_SLICES = 20
 # Don't slice below this — tiny slices give Gemini too little context.
 _MIN_FRAMES_PER_SLICE = 8
 
-# Open-vocab discovery cap. Bumped from 40 → 80 to keep more of scout's
-# long tail; we kept hitting the cap and trimming candidates that turned
-# out to be real objects. The closed-class safety net above operates
-# orthogonally to this cap, so the lower-bound on coverage is the
-# safety-net length even if scout discovers nothing.
-_MAX_SCOPED_PROMPTS = 80
+# Open-vocab discovery cap. 65 scoped phrases + global safety net keeps
+# the joined dot-separated GDINO text query comfortably under the 256-token
+# BERT cap that the GDINO text branch enforces. The closed-class safety
+# net above operates orthogonally to this cap, so the lower-bound on
+# coverage is the safety-net length even if scout discovers nothing.
+_MAX_SCOPED_PROMPTS = 65
 
 # How many evenly-spaced frames each batch sends to Gemini. 6 is the
 # Flash legibility sweet spot: more than that and the model starts merging
@@ -88,17 +84,17 @@ _MAX_SCOPED_PROMPTS = 80
 _IMAGES_PER_BATCH = 6
 
 # Frames of padding added on each side of a phrase's slice range before
-# handing it to SAM 3.1. Catches objects that drift across slice
+# handing it to the GDINO sweep. Catches objects that drift across slice
 # boundaries without scout flagging the adjacent slice.
 _RANGE_PADDING_FRAMES = 15
 
 
 @dataclass
 class ScopedPrompt:
-    """A phrase + the absolute frame range over which SAM 3.1 should track it.
+    """A phrase + the absolute frame range GDINO should detect it in.
 
     `frame_range` is ``None`` for safety-net (global) prompts that should
-    propagate across the entire video. Otherwise it's a half-open
+    fire across the entire video. Otherwise it's a half-open
     ``[start, end)`` interval over absolute video frame indices, already
     padded for entry/exit slack.
     """
@@ -252,14 +248,14 @@ def discover_scene_prompts(
     vlm_model: str = "gemini-2.5-flash",
     n_frames: int = 6,  # kept for API back-compat; now per-batch, not global
 ) -> list[ScopedPrompt]:
-    """Return per-slice scoped prompts SAM 3.1 should look for.
+    """Return per-slice scoped prompts the GDINO sweep should look for.
 
     Returns a list of ``ScopedPrompt`` objects, each tagged with the
-    absolute frame range over which SAM 3.1 should track that phrase.
+    absolute frame range over which GDINO should detect that phrase.
     Phrases discovered in multiple slices have their ranges unioned (so
-    SAM keeps single-track identity across runs of the same object class).
-    Safety-net phrases get ``frame_range=None`` and propagate over the
-    full video.
+    the linker keeps single-track identity across runs of the same
+    object class). Safety-net phrases get ``frame_range=None`` and fire
+    across the full video.
 
     On total VLM failure (every batch errors) returns just the safety net.
     """
@@ -352,7 +348,7 @@ def discover_scene_prompts(
     n_scoped = sum(1 for p in scoped if p.frame_range is not None)
     n_global = sum(1 for p in scoped if p.frame_range is None)
     print(
-        f"[scout] final SAM 3.1 prompt list: {n_scoped} scoped + {n_global} global "
+        f"[scout] final GDINO prompt list: {n_scoped} scoped + {n_global} global "
         f"(total {len(scoped)})",
         flush=True,
     )

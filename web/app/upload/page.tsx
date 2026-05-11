@@ -42,50 +42,45 @@ export default function UploadPage() {
   }
 
   return (
-    <div className="lp-home w-full max-w-[100vw] overflow-x-hidden">
-      <header className="lp-home-header lp-home-header--row">
+    <div className="lp-home flex h-[100dvh] w-full max-w-[100vw] flex-col overflow-hidden">
+      <header className="lp-home-header lp-home-header--row shrink-0">
         <Link className="lp-home-brand" href="/">
           <span className="lp-home-brand-mark" aria-hidden="true" />
           <TypingTitle />
         </Link>
       </header>
 
-      <main className="mx-auto flex w-full max-w-6xl flex-col gap-12 px-10 pb-16 pt-4 max-md:px-5">
-        <div className="grid w-full grid-cols-1 gap-8 md:grid-cols-[1.05fr_0.95fr]">
-          <div className="min-w-0">
+      <main className="mx-auto grid min-h-0 w-full max-w-[1400px] flex-1 grid-cols-1 gap-5 overflow-hidden px-6 pb-5 pt-2 max-md:px-4 lg:grid-cols-[minmax(280px,360px)_1fr]">
+        <div className="flex min-h-0 min-w-0 flex-col gap-4">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <Uploader
               state={state}
               onPick={(file) => start(file)}
               onReset={reset}
             />
           </div>
+          <button
+            type="button"
+            onClick={onStart}
+            disabled={!canSubmit}
+            className="lp-cta"
+          >
+            {submitting
+              ? "Queueing…"
+              : state.status === "uploading"
+                ? `Uploading ${(state.progress * 100).toFixed(0)}%`
+                : state.status === "done"
+                  ? "Start pipeline"
+                  : "Pick a video first"}
+            <span className="lp-btn-arrow">→</span>
+          </button>
+          {submitError && (
+            <span className="lp-field-help text-[#ffb6a3]">{submitError}</span>
+          )}
+        </div>
 
-          <div className="flex min-w-0 flex-col gap-5">
-            {/* <SettingsPanel
-              value={settings}
-              onChange={setSettings}
-              durationS={state.durationS}
-            /> */}
-            <PipelineOverview />
-            <button
-              type="button"
-              onClick={onStart}
-              disabled={!canSubmit}
-              className="lp-cta"
-            >
-              {submitting
-                ? "Queueing…"
-                : state.status === "uploading"
-                  ? `Uploading ${(state.progress * 100).toFixed(0)}%`
-                  : state.status === "done"
-                    ? "Start pipeline"
-                    : "Pick a video first"}
-              <span className="lp-btn-arrow">→</span>
-            </button>
-            {submitError && (
-              <span className="lp-field-help text-[#ffb6a3]">{submitError}</span>
-            )}
-          </div>
+        <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+          <PipelineOverview />
         </div>
       </main>
     </div>

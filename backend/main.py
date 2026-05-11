@@ -221,7 +221,19 @@ def _pull_outputs_from_modal(scene_id: str, exclude: set[str] | None = None) -> 
     def _walk(remote_dir: str) -> Iterator[str]:
         for entry in vol.iterdir(remote_dir):
             # FileEntryType.DIRECTORY == 2 in the Modal SDK.
-            if getattr(entry, "type", None) and int(entry.type) == 2:
+            is_dir = getattr(entry, "type", None) and int(entry.type) == 2
+            # Skip dirs whose prefix is in _PULL_SKIP_PREFIXES BEFORE recursing.
+            # The frames/, depth/, world_points/ dirs each have ~500 entries —
+            # listing them blows past Modal's VolumeListFiles rate limit when
+            # we'd discard every file anyway in the per-file skip loop below.
+            rel = entry.path.lstrip("/")[len(scene_id) + 1:]
+            rel_with_slash = rel + "/" if is_dir and not rel.endswith("/") else rel
+            if any(
+                rel_with_slash == p or rel_with_slash.startswith(p)
+                for p in _PULL_SKIP_PREFIXES
+            ):
+                continue
+            if is_dir:
                 yield from _walk(entry.path)
             else:
                 yield entry.path

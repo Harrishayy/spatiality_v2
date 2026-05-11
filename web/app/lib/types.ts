@@ -116,7 +116,6 @@ export interface Manifest {
     annotations_json?: string;
     thumbnail_jpg?: string;
     cameras_json?: string;
-    wireframe_ply?: string;
   };
   stats: {
     frame_count: number;

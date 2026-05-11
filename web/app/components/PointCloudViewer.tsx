@@ -29,12 +29,10 @@ import {
   DirectionalLight,
   EdgesGeometry,
   GridHelper,
-  Group,
   LineBasicMaterial,
   LineSegments,
   PerspectiveCamera,
   Points,
-  PointsMaterial,
   Scene,
   ShaderMaterial,
   Spherical,
@@ -166,310 +164,15 @@ type DebugState = {
   log: string[];
 };
 
-/** Parse a binary-LE PLY (xyz float32 + rgb uchar layout, optional
- *  confidence) and return just the xyz positions as a Float32Array of
- *  length 3N. Used to load `wireframe.ply` produced by the backend
- *  segmentation stage. The full streaming parser (used for the much
- *  larger points.ply) is not reused here because the wireframe artifact
- *  is small (~10–20 k points) and a one-shot fetch + parse is simpler.
- *
- *  Mirrors the negate-Y/Z transform applied to points.ply so the
- *  wireframe lives in the same rendered coordinate frame as the cloud
- *  it replaces. */
-function parseWireframePLY(buf: ArrayBuffer): Float32Array | null {
-  const bytes = new Uint8Array(buf);
-  const headerEnd = findEndHeader(bytes);
-  if (headerEnd < 0) return null;
-  const headerStr = new TextDecoder("ascii").decode(bytes.subarray(0, headerEnd));
-  let info: ReturnType<typeof parsePlyHeader>;
-  try {
-    info = parsePlyHeader(headerStr);
-  } catch {
-    return null;
-  }
-  const { count, stride, layout } = info;
-  const body = bytes.subarray(headerEnd);
-  if (body.length < count * stride) return null;
-  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  const out = new Float32Array(count * 3);
-  for (let i = 0; i < count; i++) {
-    const base = i * stride;
-    out[i * 3] = view.getFloat32(base + layout.x, true);
-    out[i * 3 + 1] = -view.getFloat32(base + layout.y, true);
-    out[i * 3 + 2] = -view.getFloat32(base + layout.z, true);
-  }
-  return out;
-}
-
-/** Build the wireframe-mode geometry.
- *
- *  Two source paths:
- *   - **Backend artifact** — when the segmentation pipeline emitted
- *     `wireframe.ply`, the caller passes its parsed positions as
- *     `precomputed`. We skip the client-side voxel + per-object sampling
- *     and go straight to kNN. This is the preferred path: per-object
- *     density traces actual segmented surfaces, not just a bounding-box
- *     approximation.
- *   - **Client fallback** — no artifact available. Voxel-downsample the
- *     live full cloud at 5 cm and bbox-sample each annotation for dense
- *     per-object detail.
- *
- *  Both paths converge on a kNN graph (k=5) over the resulting point
- *  set, built with a uniform grid hash sized to MAX_EDGE_LEN so
- *  disconnected objects don't bridge across empty space.
- *
- *  Adds two children to `group`: a `Points` (monochrome accent dots) and
- *  a `LineSegments` (faint accent edges). Materials are owned by the
- *  group's children and disposed via the existing `disposeChildren` path.
- */
-function buildWireframeGeometry(
-  group: Group,
-  cloud: Points,
-  annotations: Annotation[],
-  precomputed?: Float32Array,
-): void {
-  const VOXEL = 0.05; // 5 cm
-  const PER_OBJECT_SAMPLE = 500;
-  const K = 5;
-  const MAX_EDGE_LEN = 0.30;
-  const ACCENT_POINT = 0xfcd9b8; // sand
-  const ACCENT_EDGE = 0xffb347; // dusk apricot
-
-  // ── Step A: assemble the wireframe point set (`wirePos`) ───────────────
-  let wirePos: Float32Array;
-  if (precomputed && precomputed.length >= 3) {
-    // Backend artifact already encodes voxel + per-object density.
-    wirePos = precomputed;
-  } else {
-    wirePos = sampleWireframeFromCloud(cloud, annotations, VOXEL, PER_OBJECT_SAMPLE);
-  }
-  const N = (wirePos.length / 3) | 0;
-  if (N === 0) return;
-
-  buildAndAttachWireframe(group, wirePos, N, K, MAX_EDGE_LEN, ACCENT_POINT, ACCENT_EDGE);
-}
-
-/** Client-side fallback sampler: voxel-downsample the live cloud +
- *  bbox-sample each annotation. */
-function sampleWireframeFromCloud(
-  cloud: Points,
-  annotations: Annotation[],
-  VOXEL: number,
-  PER_OBJECT_SAMPLE: number,
-): Float32Array {
-  const positions = cloud.geometry.attributes.position as BufferAttribute;
-  const total = positions.count;
-  if (total === 0) return new Float32Array(0);
-
-  // Step 1: voxel downsample. Pack the integer cell key into a single
-  // number using bit-shifts so we can use a Map<number, number> instead
-  // of a string-keyed Set (10× faster on V8 for the typical scene size).
-  // Each axis is offset to be non-negative before packing; 11 bits per
-  // axis covers ±51.2 m which is well beyond any single capture.
-  const SHIFT_BITS = 11;
-  const HALF = 1 << (SHIFT_BITS - 1);
-  const MASK = (1 << SHIFT_BITS) - 1;
-  const voxelKeep = new Map<number, number>();
-  for (let i = 0; i < total; i++) {
-    const x = positions.getX(i);
-    const y = positions.getY(i);
-    const z = positions.getZ(i);
-    const cx = Math.floor(x / VOXEL) + HALF;
-    const cy = Math.floor(y / VOXEL) + HALF;
-    const cz = Math.floor(z / VOXEL) + HALF;
-    if (cx < 0 || cy < 0 || cz < 0 || cx > MASK || cy > MASK || cz > MASK) continue;
-    const key = (cx << (SHIFT_BITS * 2)) | (cy << SHIFT_BITS) | cz;
-    if (!voxelKeep.has(key)) voxelKeep.set(key, i);
-  }
-  const voxelIndices = Array.from(voxelKeep.values());
-
-  // Step 2: per-annotation dense sampling. The PLY parser flips Y/Z when
-  // uploading positions to the GPU, but annotation bboxes are still in
-  // PLY frame, so we apply the same flip to the bbox before testing.
-  const objectIndices: number[] = [];
-  for (const a of annotations) {
-    const [lo, hi] = a.bbox;
-    const minX = lo[0];
-    const maxX = hi[0];
-    // After the parser's negate-Y/Z, the rendered "min Y" is -hi[1] and
-    // the rendered "max Y" is -lo[1]; same for Z.
-    const minY = -hi[1];
-    const maxY = -lo[1];
-    const minZ = -hi[2];
-    const maxZ = -lo[2];
-    const inBox: number[] = [];
-    for (let i = 0; i < total; i++) {
-      const x = positions.getX(i);
-      const y = positions.getY(i);
-      const z = positions.getZ(i);
-      if (x < minX || x > maxX) continue;
-      if (y < minY || y > maxY) continue;
-      if (z < minZ || z > maxZ) continue;
-      inBox.push(i);
-    }
-    // Random sample without replacement (Fisher–Yates partial shuffle).
-    if (inBox.length <= PER_OBJECT_SAMPLE) {
-      for (const idx of inBox) objectIndices.push(idx);
-    } else {
-      for (let s = 0; s < PER_OBJECT_SAMPLE; s++) {
-        const r = s + Math.floor(Math.random() * (inBox.length - s));
-        const tmp = inBox[s];
-        inBox[s] = inBox[r];
-        inBox[r] = tmp;
-        objectIndices.push(inBox[s]);
-      }
-    }
-  }
-
-  // Combine voxel + object indices, then materialize a flat Float32Array.
-  const allIndices = voxelIndices.concat(objectIndices);
-  const N = allIndices.length;
-  const wirePos = new Float32Array(N * 3);
-  for (let i = 0; i < N; i++) {
-    const src = allIndices[i];
-    wirePos[i * 3] = positions.getX(src);
-    wirePos[i * 3 + 1] = positions.getY(src);
-    wirePos[i * 3 + 2] = positions.getZ(src);
-  }
-  return wirePos;
-}
-
-/** Build a kNN graph over `wirePos` and attach Points + LineSegments to
- *  the group. Uniform grid hash sized to MAX_EDGE_LEN so neighbour search
- *  is O(N·k); long edges (across empty space) are excluded by the same
- *  cutoff. */
-function buildAndAttachWireframe(
-  group: Group,
-  wirePos: Float32Array,
-  N: number,
-  K: number,
-  MAX_EDGE_LEN: number,
-  ACCENT_POINT: number,
-  ACCENT_EDGE: number,
-): void {
-  const SHIFT_BITS = 11;
-  const HALF = 1 << (SHIFT_BITS - 1);
-
-  const grid = new Map<number, number[]>();
-  const cellOf = (x: number, y: number, z: number): number => {
-    const cx = Math.floor(x / MAX_EDGE_LEN) + HALF;
-    const cy = Math.floor(y / MAX_EDGE_LEN) + HALF;
-    const cz = Math.floor(z / MAX_EDGE_LEN) + HALF;
-    return (cx << (SHIFT_BITS * 2)) | (cy << SHIFT_BITS) | cz;
-  };
-  for (let i = 0; i < N; i++) {
-    const c = cellOf(wirePos[i * 3], wirePos[i * 3 + 1], wirePos[i * 3 + 2]);
-    let bucket = grid.get(c);
-    if (!bucket) {
-      bucket = [];
-      grid.set(c, bucket);
-    }
-    bucket.push(i);
-  }
-  const edgeIndex: number[] = [];
-  const seenEdge = new Set<number>();
-  const maxEdgeSq = MAX_EDGE_LEN * MAX_EDGE_LEN;
-  // Pre-allocated per-iteration neighbour scratch — k closest.
-  const bestDist = new Float64Array(K);
-  const bestIdx = new Int32Array(K);
-  for (let i = 0; i < N; i++) {
-    const x = wirePos[i * 3];
-    const y = wirePos[i * 3 + 1];
-    const z = wirePos[i * 3 + 2];
-    for (let k = 0; k < K; k++) {
-      bestDist[k] = Infinity;
-      bestIdx[k] = -1;
-    }
-    const ix = Math.floor(x / MAX_EDGE_LEN);
-    const iy = Math.floor(y / MAX_EDGE_LEN);
-    const iz = Math.floor(z / MAX_EDGE_LEN);
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          const cx = ix + dx + HALF;
-          const cy = iy + dy + HALF;
-          const cz = iz + dz + HALF;
-          const c = (cx << (SHIFT_BITS * 2)) | (cy << SHIFT_BITS) | cz;
-          const bucket = grid.get(c);
-          if (!bucket) continue;
-          for (const j of bucket) {
-            if (j === i) continue;
-            const ex = wirePos[j * 3] - x;
-            const ey = wirePos[j * 3 + 1] - y;
-            const ez = wirePos[j * 3 + 2] - z;
-            const d2 = ex * ex + ey * ey + ez * ez;
-            if (d2 > maxEdgeSq) continue;
-            // Insert into k-best.
-            for (let k = 0; k < K; k++) {
-              if (d2 < bestDist[k]) {
-                for (let m = K - 1; m > k; m--) {
-                  bestDist[m] = bestDist[m - 1];
-                  bestIdx[m] = bestIdx[m - 1];
-                }
-                bestDist[k] = d2;
-                bestIdx[k] = j;
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-    for (let k = 0; k < K; k++) {
-      const j = bestIdx[k];
-      if (j < 0) continue;
-      // Dedup undirected edges.
-      const a = i < j ? i : j;
-      const b = i < j ? j : i;
-      const eKey = a * N + b;
-      if (seenEdge.has(eKey)) continue;
-      seenEdge.add(eKey);
-      edgeIndex.push(a, b);
-    }
-  }
-
-  // Build the three.js objects. Points: small monochrome dots. Edges:
-  // one LineSegments mesh sharing the same position buffer (indexed).
-  const wireGeo = new BufferGeometry();
-  wireGeo.setAttribute("position", new BufferAttribute(wirePos, 3));
-
-  const pointMat = new PointsMaterial({
-    color: new Color(ACCENT_POINT),
-    size: 0.012,
-    sizeAttenuation: true,
-    transparent: true,
-    opacity: 0.7,
-    depthWrite: false,
-  });
-  const points = new Points(wireGeo, pointMat);
-  group.add(points);
-
-  // Edges share the same position buffer to avoid duplicating ~N×12 bytes;
-  // a separate index attribute defines the line topology.
-  const edgeGeo = new BufferGeometry();
-  edgeGeo.setAttribute("position", new BufferAttribute(wirePos, 3));
-  edgeGeo.setIndex(new BufferAttribute(new Uint32Array(edgeIndex), 1));
-  const lineMat = new LineBasicMaterial({
-    color: new Color(ACCENT_EDGE),
-    transparent: true,
-    opacity: 0.55,
-  });
-  const lines = new LineSegments(edgeGeo, lineMat);
-  group.add(lines);
-}
 
 interface Props {
   pointsUrl: string;
   annotations: Annotation[];
   /** Set true when points.ply is empty/0-vertex; we'll show a placeholder. */
   emptyCloud?: boolean;
-  /** Optional pre-baked wireframe.ply URL. When undefined the viewer skips the
-   *  artifact fetch entirely and uses the client-side voxel sampler. Gated by
-   *  the manifest so we don't 404 on scenes that never produced one. */
-  wireframeUrl?: string;
 }
 
-export function PointCloudViewer({ pointsUrl, annotations, emptyCloud, wireframeUrl }: Props) {
+export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<{
@@ -481,7 +184,6 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud, wireframe
   const selectedId = useUI((s) => s.selectedId);
   const renderMode = useUI((s) => s.renderMode);
   const showAnnotations = useUI((s) => s.showAnnotations);
-  const wireframeMode = useUI((s) => s.wireframeMode);
   const [debug, setDebug] = useState<DebugState>({ status: "idle", log: [] });
   const debugRef = useRef(debug);
   debugRef.current = debug;
@@ -530,21 +232,10 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud, wireframe
   const shaderMatRef = useRef<ShaderMaterial | null>(null);
   const cloudRef = useRef<Points | null>(null);
   const markDirtyRef = useRef<(() => void) | null>(null);
-  // Wireframe mode owns its own three.js group (lazy-built on first
-  // activation), a DOM overlay layer for billboarded labels, and a
-  // per-frame label-update hook the render loop calls so labels follow
-  // the camera as it orbits.
-  const wireframeGroupRef = useRef<Group | null>(null);
-  const wireframeBuiltRef = useRef(false);
-  const wireframeLabelLayerRef = useRef<HTMLDivElement | null>(null);
-  const wireframeLabelDivsRef = useRef<HTMLDivElement[]>([]);
-  const wireframeUpdateLabelsRef = useRef<(() => void) | null>(null);
   // Sibling click handler reads the latest store values via these refs so it
   // doesn't need to re-bind on every state change.
   const renderModeRef = useRef(renderMode);
-  const wireframeModeRef = useRef(wireframeMode);
   useEffect(() => { renderModeRef.current = renderMode; }, [renderMode]);
-  useEffect(() => { wireframeModeRef.current = wireframeMode; }, [wireframeMode]);
 
   // Imperative API the surrounding UI (zoom buttons, minimap) calls into.
   type ViewerApi = {
@@ -571,169 +262,6 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud, wireframe
     markDirtyRef.current?.();
   }, [renderMode]);
 
-  // Wireframe mode → reduced point cloud + kNN edges + DOM labels.
-  //
-  // Lifecycle: lazy-built on first activation from the streaming PLY's
-  // position buffer (via `cloudRef.current.geometry`). The full cloud's
-  // GPU buffers stay resident for instant flip-back; we just toggle
-  // `cloud.visible`. Subsequent toggles never rebuild the geometry.
-  //
-  // The label overlay is a sibling DOM layer to `containerRef`; the
-  // render loop calls `wireframeUpdateLabelsRef.current()` each frame to
-  // project annotation centroids → CSS pixels.
-  useEffect(() => {
-    const group = wireframeGroupRef.current;
-    const cloud = cloudRef.current;
-    if (!group) return;
-
-    // Always-up-to-date cloud reveal. If wireframe just turned off, the
-    // toggle below restores `cloud.visible = true` even if the geometry
-    // was never built (e.g., user toggled before the PLY finished).
-    const setCloudVisible = (visible: boolean) => {
-      if (cloud) cloud.visible = visible;
-    };
-
-    if (!wireframeMode) {
-      group.visible = false;
-      setCloudVisible(true);
-      // Hide label overlay + clear the per-frame updater so the render
-      // loop stops touching DOM nodes that may have been unmounted.
-      const layer = wireframeLabelLayerRef.current;
-      if (layer) layer.style.display = "none";
-      wireframeUpdateLabelsRef.current = null;
-      markDirtyRef.current?.();
-      return;
-    }
-
-    // Lazy build on first activation. Requires the PLY to have finished
-    // streaming so positions are populated; if the user toggled too
-    // early we just hide the cloud and wait — bail-out leaves group empty.
-    if (!cloud) {
-      // Nothing to build from yet — the streaming load will populate
-      // cloudRef.current later; the user can toggle off+on to retry.
-      return;
-    }
-
-    if (!wireframeBuiltRef.current) {
-      // Build is async because we first try to fetch the backend
-      // artifact (`wireframe.ply`); fall back to the client-side voxel
-      // sampler if it's missing or fails to parse. We mark `built`
-      // synchronously to avoid re-entry on rapid toggles.
-      wireframeBuiltRef.current = true;
-      // Only hit the network when the manifest advertises wireframe.ply —
-      // otherwise the 404 noise drowns the console and the voxel sampler is
-      // already a fine fallback.
-      const tryArtifact = wireframeUrl
-        ? fetch(wireframeUrl)
-            .then((r) => (r.ok ? r.arrayBuffer() : null))
-            .then((b) => (b ? parseWireframePLY(b) : null))
-            .catch(() => null)
-        : Promise.resolve(null);
-      tryArtifact.then((precomputed) => {
-        // If the user toggled off before the fetch finished, leave the
-        // group empty — they can flip back on to retry.
-        if (!wireframeGroupRef.current) return;
-        buildWireframeGeometry(
-          group,
-          cloud,
-          annotationsRef.current,
-          precomputed ?? undefined,
-        );
-        markDirtyRef.current?.();
-      });
-    }
-
-    group.visible = true;
-    setCloudVisible(false);
-
-    // Build the DOM label layer the first time the user activates.
-    // Mounted as a sibling to containerRef so it sits on top of the
-    // canvas without intercepting pointer events.
-    const container = containerRef.current;
-    if (container && !wireframeLabelLayerRef.current) {
-      const layer = document.createElement("div");
-      layer.className = "pointer-events-none absolute inset-0 overflow-hidden";
-      layer.style.position = "absolute";
-      layer.style.inset = "0";
-      layer.style.pointerEvents = "none";
-      container.appendChild(layer);
-      wireframeLabelLayerRef.current = layer;
-    }
-
-    // (Re)populate label divs to match the current annotation list.
-    const layer = wireframeLabelLayerRef.current;
-    if (layer) {
-      layer.style.display = "block";
-      // Tear down old divs — annotations may have changed between toggles.
-      for (const d of wireframeLabelDivsRef.current) d.remove();
-      wireframeLabelDivsRef.current = [];
-      for (const a of annotationsRef.current) {
-        const d = document.createElement("div");
-        d.textContent = a.label;
-        d.style.position = "absolute";
-        d.style.transform = "translate(-50%, -100%)";
-        d.style.padding = "2px 6px";
-        d.style.fontSize = "10px";
-        d.style.fontFamily = "ui-monospace, monospace";
-        d.style.color = "#fcd9b8";
-        d.style.background = "rgba(20, 16, 28, 0.78)";
-        d.style.border = "1px solid rgba(255, 179, 71, 0.45)";
-        d.style.borderRadius = "3px";
-        d.style.whiteSpace = "nowrap";
-        d.style.opacity = "0";
-        layer.appendChild(d);
-        wireframeLabelDivsRef.current.push(d);
-      }
-    }
-
-    // Per-frame projection hook the render loop calls. Reads the live
-    // camera + container size every tick so labels stay glued to their
-    // 3D anchor as the user orbits.
-    wireframeUpdateLabelsRef.current = () => {
-      const layer = wireframeLabelLayerRef.current;
-      const cam = sceneRef.current.camera;
-      if (!layer || !cam) return;
-      const w = layer.clientWidth;
-      const h = layer.clientHeight;
-      const tmp = new Vector3();
-      const anns = annotationsRef.current;
-      const divs = wireframeLabelDivsRef.current;
-      for (let i = 0; i < divs.length && i < anns.length; i++) {
-        const c = anns[i].centroid;
-        // Annotation centroids are recorded in PLY frame; the parser
-        // negates Y/Z when uploading point positions (see line ~1314).
-        // Apply the same flip here so labels anchor to the rendered cloud.
-        tmp.set(c[0], -c[1], -c[2]);
-        tmp.project(cam);
-        // Behind camera (z >= 1) → hide.
-        if (tmp.z >= 1 || tmp.z <= -1) {
-          divs[i].style.opacity = "0";
-          continue;
-        }
-        const px = (tmp.x * 0.5 + 0.5) * w;
-        const py = (-tmp.y * 0.5 + 0.5) * h;
-        divs[i].style.left = `${px}px`;
-        divs[i].style.top = `${py - 6}px`;
-        divs[i].style.opacity = "1";
-      }
-    };
-
-    markDirtyRef.current?.();
-  }, [wireframeMode, annotations, wireframeUrl]);
-
-  // Tear down wireframe DOM on unmount.
-  useEffect(() => {
-    return () => {
-      for (const d of wireframeLabelDivsRef.current) d.remove();
-      wireframeLabelDivsRef.current = [];
-      const layer = wireframeLabelLayerRef.current;
-      if (layer) {
-        layer.remove();
-        wireframeLabelLayerRef.current = null;
-      }
-      wireframeUpdateLabelsRef.current = null;
-    };
-  }, []);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -812,32 +340,6 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud, wireframe
 
       // Light scene scaffolding so the cloud has spatial context.
       scene.add(new GridHelper(8, 16, 0x3a3a46, 0x1a1a20));
-
-      // Wireframe group exists from the start (empty) and is lazily built
-      // on first activation.
-      const wireframeGroup = new Group();
-      wireframeGroup.visible = false;
-      scene.add(wireframeGroup);
-      wireframeGroupRef.current = wireframeGroup;
-      cleanup.push(() => {
-        if (wireframeGroupRef.current === wireframeGroup) {
-          wireframeGroupRef.current = null;
-        }
-        wireframeBuiltRef.current = false;
-        scene.remove(wireframeGroup);
-        // Children may own geometries/materials — dispose those.
-        const disposeChildren = (g: Group) => {
-          g.traverse((obj) => {
-            const o = obj as unknown as {
-              geometry?: { dispose: () => void };
-              material?: { dispose: () => void };
-            };
-            o.geometry?.dispose?.();
-            o.material?.dispose?.();
-          });
-        };
-        disposeChildren(wireframeGroup);
-      });
 
       // Camera controls:
       //   left-drag   → orbit around `target` (theta/phi)
@@ -1049,10 +551,6 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud, wireframe
             [tmpDir.x, tmpDir.y, tmpDir.z],
           );
           renderer.render(scene, camera);
-          // Wireframe-mode floating labels: project annotation centroids
-          // each frame so DOM tags follow the camera as the user orbits.
-          // No-op when the mode is off (the hook is null).
-          wireframeUpdateLabelsRef.current?.();
           lastRender = now;
           lastTheta = sph.theta;
           lastPhi = sph.phi;

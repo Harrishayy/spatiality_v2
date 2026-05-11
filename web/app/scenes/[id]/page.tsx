@@ -13,7 +13,7 @@ import {
 } from "@/components/SidePanel";
 import { useChat } from "@/hooks/useChat";
 import { useScene } from "@/hooks/useScene";
-import { getArtifactUrl, HttpError } from "@/lib/api";
+import { HttpError } from "@/lib/api";
 import { useUI } from "@/store/ui";
 import type { Manifest, StageStatus } from "@/lib/types";
 
@@ -55,12 +55,6 @@ export default function ScenePage() {
   const annos = useMemo(() => annotations.data ?? [], [annotations.data]);
   const discardedAnnos = useMemo(() => discarded.data ?? [], [discarded.data]);
   const emptyCloud = (m?.stats.splat_size_mb ?? 0) <= 0.001;
-  // Only pass a wireframeUrl when the manifest advertises one. The viewer
-  // skips its artifact fetch otherwise (and falls back to voxel sampling),
-  // which is what we want for scenes that never produced wireframe.ply.
-  const wireframeUrl = m?.artifacts?.wireframe_ply
-    ? getArtifactUrl(sceneId, "wireframe.ply")
-    : undefined;
   const segStatus: StageStatus = m?.stages.segmentation.status ?? "pending";
   const failed = m?.status === "failed";
 
@@ -75,7 +69,6 @@ export default function ScenePage() {
               pointsUrl={pointsUrl.data}
               annotations={annos}
               emptyCloud={emptyCloud}
-              wireframeUrl={wireframeUrl}
             />
           ) : (
             <PipelinePending manifest={m} failed={failed} />

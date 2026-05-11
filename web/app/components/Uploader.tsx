@@ -41,14 +41,18 @@ export function Uploader({ state, onPick, onReset }: Props) {
         handleFiles(e.dataTransfer.files);
       }}
       onClick={() => inputRef.current?.click()}
-      className={`lp-dropzone ${dragOver ? "lp-dropzone--over" : ""}`}
+      className={`lp-dropzone lp-dropzone--fill ${dragOver ? "lp-dropzone--over" : ""}`}
     >
-      <span className="lp-dropzone-mark" aria-hidden>
+      <span className="lp-dropzone-mark lp-dropzone-mark--lg" aria-hidden>
         ↑
       </span>
-      <div className="flex flex-col items-center gap-1.5">
-        <span className="lp-dropzone-title">Drop a video to start</span>
-        <span className="lp-dropzone-sub">MP4, MOV or WebM — up to 2 GB</span>
+      <div className="flex flex-col items-center gap-2">
+        <span className="lp-dropzone-title lp-dropzone-title--lg">
+          Drop a video to start
+        </span>
+        <span className="lp-dropzone-sub">
+          MP4, MOV or WebM — up to 2 GB
+        </span>
       </div>
       <input
         ref={inputRef}

@@ -159,42 +159,54 @@ const STAGES: Stage[] = [
 
 export function PipelineOverview() {
   return (
-    <section className="lp-surface min-w-0">
-      <header className="lp-surface-head">
-        <div>
+    <section className="lp-surface lp-surface--tight min-h-0 min-w-0 max-w-full flex-1 overflow-hidden">
+      <header className="flex min-w-0 shrink-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <div className="min-w-0">
           <h2 className="lp-surface-title">Pipeline overview</h2>
-          <p className="lp-surface-sub">
-            Ten stages from video to labelled 3D scene. Hyperparameters below are the live defaults used for this run.
+          <p className="lp-surface-sub break-words">
+            Ten stages from video to labelled 3D scene. Hyperparameters below
+            are the live defaults used for this run.
           </p>
         </div>
-        <span className="lp-eyebrow-mono">10 stages</span>
+        <span className="lp-eyebrow-mono whitespace-nowrap">10 stages</span>
       </header>
 
-      <ol className="flex flex-col gap-4">
+      <ol className="grid min-h-0 min-w-0 flex-1 auto-rows-min grid-cols-1 content-start gap-3 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3">
         {STAGES.map((stage) => (
           <li
             key={stage.index}
-            className="flex flex-col gap-2 rounded-[10px] border border-[rgba(255,235,220,0.08)] bg-[rgba(255,255,255,0.015)] p-3.5"
+            className="flex min-w-0 max-w-full flex-col gap-2 overflow-hidden rounded-[10px] border border-[rgba(255,235,220,0.08)] bg-[rgba(255,255,255,0.015)] p-3"
           >
-            <div className="flex items-baseline justify-between gap-3">
-              <div className="flex items-baseline gap-2">
-                <span className="lp-eyebrow-mono opacity-70">{stage.index.padStart(2, "0")}</span>
-                <span className="text-[13.5px] font-semibold tracking-[-0.01em] text-[var(--ink-100)]">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <div className="flex min-w-0 items-baseline gap-2">
+                <span className="lp-eyebrow-mono opacity-70">
+                  {stage.index.padStart(2, "0")}
+                </span>
+                <span className="min-w-0 flex-1 break-words text-[13.5px] font-semibold tracking-[-0.01em] text-[var(--ink-100)]">
                   {stage.title}
                 </span>
               </div>
-              <span className="lp-eyebrow-mono whitespace-nowrap">{stage.where}</span>
+              <span className="lp-eyebrow-mono block min-w-0 break-words text-[10.5px] opacity-80">
+                {stage.where}
+              </span>
             </div>
 
-            <p className="text-[12px] leading-[1.55] text-[var(--ink-500)]">{stage.summary}</p>
+            <p className="break-words text-[11.5px] leading-[1.5] text-[var(--ink-500)]">
+              {stage.summary}
+            </p>
 
-            <dl className="mt-1 grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
+            <dl className="mt-0.5 grid min-w-0 grid-cols-2 gap-x-2 gap-y-1.5">
               {stage.params.map((p) => (
-                <div key={p.name} className="flex items-baseline justify-between gap-2 border-b border-[rgba(255,235,220,0.05)] py-1 last:border-b-0">
-                  <dt className="font-mono text-[11px] uppercase tracking-[0.04em] text-[var(--ink-500)]">
+                <div
+                  key={p.name}
+                  className="flex min-w-0 flex-col gap-0.5 overflow-hidden rounded-[6px] bg-[rgba(255,255,255,0.02)] px-2 py-1"
+                >
+                  <dt className="min-w-0 truncate font-mono text-[9.5px] uppercase tracking-[0.06em] text-[var(--ink-500)]">
                     {p.name}
                   </dt>
-                  <dd className="font-mono text-[11.5px] text-[var(--ink-100)]">{p.value}</dd>
+                  <dd className="min-w-0 break-words font-mono text-[11px] leading-[1.35] text-[var(--ink-100)]">
+                    {p.value}
+                  </dd>
                 </div>
               ))}
             </dl>

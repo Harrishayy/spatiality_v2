@@ -445,6 +445,10 @@ button { font: inherit; }
   flex-direction: column;
   gap: 22px;
 }
+.lp-surface--tight {
+  padding: 18px;
+  gap: 14px;
+}
 .lp-surface-head {
   display: flex;
   align-items: baseline;
@@ -480,6 +484,12 @@ button { font: inherit; }
   cursor: pointer;
   transition: border-color 160ms ease, background 160ms ease;
 }
+.lp-dropzone--fill {
+  height: 100%;
+  min-height: 0;
+  gap: 22px;
+  padding: 48px 32px;
+}
 .lp-dropzone:hover,
 .lp-dropzone--over {
   border-color: rgba(255, 157, 111, 0.5);
@@ -497,12 +507,22 @@ button { font: inherit; }
   font-size: 22px;
   line-height: 1;
 }
+.lp-dropzone-mark--lg {
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  font-size: 32px;
+}
 .lp-dropzone-title {
   font-family: var(--sans);
   font-size: 16px;
   font-weight: 600;
   letter-spacing: -0.012em;
   color: var(--ink-100);
+}
+.lp-dropzone-title--lg {
+  font-size: 22px;
+  letter-spacing: -0.018em;
 }
 .lp-dropzone-sub {
   font-family: var(--sans);

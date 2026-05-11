@@ -1,10 +1,17 @@
-// "What the model saw" — for the selected annotation, render each keyframe
-// where SAM 3.1 produced a mask, with that mask overlaid in the
-// annotation's color. The masks themselves live under
-// `artifacts/scenes/<id>/masks/<annotation_id>/<frame_stem>.png` (written
-// by `segmentation.lift_masks._write_cluster_masks`); we bind them as CSS
-// `mask-image` on a colored div so we never have to load mask pixels into
-// JS — the browser composites in C.
+// "What the model saw" — for the selected annotation, render each
+// per-(track, frame) crop the segmentation lift produced, with the SAM
+// 2.1 mask overlaid in the annotation's color. Crops + masks are written
+// by `segmentation.lift._write_track_evidence`:
+//
+//   artifacts/scenes/<id>/evidence/<annotation_id>/<frame_stem>.jpg
+//   artifacts/scenes/<id>/masks/<annotation_id>/<frame_stem>.png
+//
+// Both files share the same dimensions (bbox+pad crop of the source
+// frame, resized to ~384 px on the longest side). The mask is bound as a
+// CSS `mask-image` on a tinted div so the browser composites alpha in C
+// without us touching mask pixels in JS. Frames where SAM declined a
+// mask get a bbox-fill rectangle so the user still sees "what GDINO
+// picked up" rather than a black tile.
 
 "use client";
 
@@ -77,7 +84,7 @@ function EvidenceTile({
   tint: string;
   onOpen: () => void;
 }) {
-  const frameSrc = evidenceFrameUrl(sceneId, frameName);
+  const frameSrc = evidenceFrameUrl(sceneId, annotationId, frameName);
   const maskSrc = maskUrl(sceneId, annotationId, frameName);
   const [frameError, setFrameError] = useState(false);
   const [maskError, setMaskError] = useState(false);
@@ -176,7 +183,7 @@ function EvidenceLightbox({
   label: string;
   onClose: () => void;
 }) {
-  const frameSrc = evidenceFrameUrl(sceneId, frameName);
+  const frameSrc = evidenceFrameUrl(sceneId, annotationId, frameName);
   const maskSrc = maskUrl(sceneId, annotationId, frameName);
   const [maskError, setMaskError] = useState(false);
 

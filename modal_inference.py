@@ -54,8 +54,8 @@ image = (
         "torchvision==0.19.0",
     )
     .pip_install(
-        # SAM3.1 (in segmentation image) requires numpy>=1.26 — keeping the same
-        # floor here so artefacts produced by inference round-trip cleanly.
+        # SAM 2.1 (in segmentation image) requires numpy>=1.26 — keeping the
+        # same floor here so artefacts produced by inference round-trip cleanly.
         "numpy>=1.26,<2",
         "Pillow",
         "opencv-python-headless",

@@ -173,12 +173,38 @@ def _push_inputs_to_modal(scene_id: str) -> None:
         batch.put_directory(str(src), f"/{scene_id}")
 
 
+# Path prefixes that are pipeline-internal (only consumed on Modal during
+# segmentation) and have no local consumer once the run completes. Skipping
+# them shrinks a typical pull from ~200 MB to ~10–20 MB. Re-add a prefix
+# here if a future local feature needs it.
+#
+#   frames/                — replaced by per-(track, frame) evidence crops
+#                            under evidence/<id>/<frame>.jpg
+#   depth/, depth_conf/    — VGGT depth maps; only used by Stage 3 lift
+#   world_points*/         — VGGT point-head outputs; same
+#   _forward_preds.pt      — Stage 1 crash-safety checkpoint
+#   _lifted_tracks_v2.pkl  — Stage 2/3 crash-safety checkpoint
+_PULL_SKIP_PREFIXES: tuple[str, ...] = (
+    "frames/",
+    "depth/",
+    "depth_conf/",
+    "world_points/",
+    "world_points_conf/",
+    "_forward_preds.pt",
+    "_lifted_tracks_v2.pkl",
+)
+
+
 def _pull_outputs_from_modal(scene_id: str, exclude: set[str] | None = None) -> None:
     """Mirror Modal `spatiality-outputs`/<id>/ back to local data/outputs/<id>/.
 
     Walks the remote tree with ``Volume.iterdir`` and streams each file via
     ``Volume.read_file``. Done after every Modal stage so the local disk is
     always the source of truth the FastAPI artifact endpoint serves from.
+
+    Skips pipeline-internal artefacts (see ``_PULL_SKIP_PREFIXES``) that
+    have no local consumer — these stay on the Modal volume where the next
+    stage / a re-run can still reach them.
 
     ``exclude`` is a set of scene-relative paths (e.g. ``{"manifest.json"}``)
     to skip. The poses→segmentation overlap pulls with manifest excluded so
@@ -209,6 +235,8 @@ def _pull_outputs_from_modal(scene_id: str, exclude: set[str] | None = None) -> 
     for remote_path in files:
         rel = remote_path.lstrip("/")[len(scene_id) + 1:]  # strip "<id>/"
         if rel in skip:
+            continue
+        if any(rel == p or rel.startswith(p) for p in _PULL_SKIP_PREFIXES):
             continue
         local_path = dst_root / rel
         local_path.parent.mkdir(parents=True, exist_ok=True)

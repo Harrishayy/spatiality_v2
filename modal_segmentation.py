@@ -1,28 +1,32 @@
-"""Modal container: Grounding DINO + bbox-depth lift + 3 labeling lanes.
+"""Modal container: Grounding DINO + mask-grade lift + Lane B/C labeling.
 
 Stage 2+ of the pipeline. Reads geometry artefacts from Stage 1 (points.ply,
 cameras.json, depth/, depth_conf/, frames/) and runs:
 
-    - Grounding DINO (`IDEA-Research/grounding-dino-base`) per-frame
-      open-vocabulary detection over scout-discovered phrases
-    - IoU tracklet linking — each tracklet becomes a Track directly (no
-      mask propagation; the lift consumes bboxes, not masks)
-    - 3D pinning per track via bbox-depth unprojection (5×5 grid sampling
-      inside each frame's bbox, confidence-gated, PCA-OBB)
-    - Lane B  : VLM-verified labels via orbital novel-view renders + Gemini
-                (asyncio.gather, 16-way concurrent, per-track flush)
-    - Lane E  : ConceptGraphs-style scene graph (objects + relations) via Gemini
-    - Lane F  : SpatialLM layout (walls, doors, windows) — degrades to empty
-                layout if SpatialLM is unavailable in the image.
+    - Scout      : Gemini 2.5 Flash discovers a noun-phrase vocabulary
+                   from temporal slices of the frame stream
+    - GDINO      : `IDEA-Research/grounding-dino-base` per-frame
+                   open-vocabulary detection over scout phrases
+    - IoU link   : tracklet linking on the per-frame bboxes — each
+                   tracklet becomes a Track directly
+    - 3D lift    : per-track centroid + PCA-OBB via SAM 2.1-hiera-tiny
+                   mask-grade unprojection (falls back to bbox-interior
+                   grid if SAM is unavailable), confidence-gated
+    - Lane B     : VLM-verified labels via orbital novel-view renders +
+                   Gemini (asyncio.gather, 16-way concurrent, per-track flush)
+    - Lane C     : whole-scene coherence review (one Gemini call over the
+                   full Lane B output) — re-labels / drops obvious mistakes
 
-Why no SAM 2: SAM 2's mask-propagation outputs were only consumed by an
-old mask-pixel lift. The web UI never rendered masks, and bbox-center
-depth unprojection gives ~5–10 cm centroid accuracy — well within the
-"geometrically coherent" target. Dropping SAM 2 saves ~10 min wall-clock
-per scene and an entire git+ install in the image.
+Why no SAM 2 mask propagation: SAM 2's per-frame video-state propagation
+was only consumed by an old mask-pixel lift. Bbox-depth unprojection at
+mask-grade resolution (SAM 2.1 still loaded for per-frame masks, but no
+cross-frame state) gives ~5–10 cm centroid accuracy at a fraction of the
+wall-clock cost of propagation. Lanes E (scene-graph relations) and F
+(SpatialLM layout) were removed 2026-05-10 — neither was contributing to
+the VLM-labelling story; bring them back as new stages if needed.
 
-Outputs three independent annotations.json variants (annotations.b.json,
-annotations.e.json, annotations.f.json) that the web UI can switch between.
+Outputs annotations.b.json (Lane B raw) and annotations.c.json (Lane C
+coherence-reviewed). The web UI prefers annotations.c.json when present.
 
 Auth via existing Modal Secrets:
     - `huggingface`     → HF_TOKEN (only needed if you swap to a gated model)

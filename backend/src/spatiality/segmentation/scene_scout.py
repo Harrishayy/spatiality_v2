@@ -75,12 +75,12 @@ _TARGET_N_SLICES = 20
 # Don't slice below this — tiny slices give Gemini too little context.
 _MIN_FRAMES_PER_SLICE = 8
 
-# Open-vocab discovery cap. Bumped from 25 → 40 (we hit the cap on the
-# demo scene, trimming long-tail filler that occasionally was a real
-# object). The closed-class safety net above operates orthogonally to
-# this cap, so the lower-bound on coverage is the safety-net length even
-# if scout discovers nothing.
-_MAX_SCOPED_PROMPTS = 40
+# Open-vocab discovery cap. Bumped from 40 → 80 to keep more of scout's
+# long tail; we kept hitting the cap and trimming candidates that turned
+# out to be real objects. The closed-class safety net above operates
+# orthogonally to this cap, so the lower-bound on coverage is the
+# safety-net length even if scout discovers nothing.
+_MAX_SCOPED_PROMPTS = 80
 
 # How many evenly-spaced frames each batch sends to Gemini. 6 is the
 # Flash legibility sweet spot: more than that and the model starts merging

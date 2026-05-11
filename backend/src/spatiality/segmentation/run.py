@@ -135,7 +135,7 @@ def run(input_id: str, **kwargs) -> dict:
     # siglip_feat) are never silently loaded into the new dataclass.
     import pickle as _pickle
     lifted_ckpt = scene_dir / "_lifted_tracks_v2.pkl"
-    sam_tracks: list = []
+    gdino_tracks: list = []
     lifted: list = []
 
     try:
@@ -177,9 +177,9 @@ def run(input_id: str, **kwargs) -> dict:
             # Stage 2 — Grounding DINO + IoU tracklet linking.
             from .gdino import run_gdino
 
-            t_sam = time.time()
+            t_gdino = time.time()
             print("[stage:segmentation] === Stage 2: GDINO detect + IoU-link ===", flush=True)
-            sam_tracks = run_gdino(
+            gdino_tracks = run_gdino(
                 frames_dir=scene_dir / "frames",
                 out_dir=scene_dir,
                 text_prompts=scout_prompts,
@@ -187,15 +187,15 @@ def run(input_id: str, **kwargs) -> dict:
                 score_threshold=float(kwargs.get("gdino_score_threshold", 0.20)),
                 min_track_frames=int(kwargs.get("min_track_frames", 5)),
             )
-            print(f"[stage:segmentation] GDINO done in {time.time()-t_sam:.1f}s — "
-                  f"{len(sam_tracks)} tracks", flush=True)
+            print(f"[stage:segmentation] GDINO done in {time.time()-t_gdino:.1f}s — "
+                  f"{len(gdino_tracks)} tracks", flush=True)
 
             # Stage 3 — bbox-depth lifting.
             from .lift import run_lifting
 
             t_lift = time.time()
-            print(f"[stage:segmentation] === Stage 3: 3D lifting on {len(sam_tracks)} tracks ===", flush=True)
-            lifted = run_lifting(sam_tracks, scene_dir)
+            print(f"[stage:segmentation] === Stage 3: 3D lifting on {len(gdino_tracks)} tracks ===", flush=True)
+            lifted = run_lifting(gdino_tracks, scene_dir)
             print(f"[stage:segmentation] lifting done in {time.time()-t_lift:.1f}s — "
                   f"{len(lifted)} lifted tracks", flush=True)
 
@@ -258,13 +258,13 @@ def run(input_id: str, **kwargs) -> dict:
                 print(f"[stage:segmentation] WARN: could not delete {lifted_ckpt}: {e}", flush=True)
 
         print(f"[stage:segmentation] DONE in {duration:.1f}s — "
-              f"{len(sam_tracks)} tracks, {len(lifted)} lifted, "
+              f"{len(gdino_tracks)} tracks, {len(lifted)} lifted, "
               f"{len(lane_b_anns)} labelled, {len(lane_c_anns)} after coherence",
               flush=True)
         return {
             "input_id": input_id,
             "status": "complete",
-            "track_count": len(sam_tracks),
+            "track_count": len(gdino_tracks),
             "annotation_count": len(lane_c_anns),
             "duration_s": duration,
             "lanes": lanes,

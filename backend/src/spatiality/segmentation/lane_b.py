@@ -268,7 +268,16 @@ async def _label_one(
                 "n_frames": len(track.frame_ids),
             },
             "alternatives": reply.get("alternatives", []),
-            "frame_ids": [f"{fid}.png" for fid in track.frame_ids],
+            # Surface only the frames for which the lift wrote per-(track,
+            # frame) evidence (`evidence/<id>/<frame>.jpg` +
+            # `masks/<id>/<frame>.png`). The UI's evidence panel only ever
+            # requests these stems, so it never sees a 404 on a frame the
+            # lift didn't consider. Falls back to the full track frame
+            # list for legacy lifted-track pickles missing the field.
+            "frame_ids": [
+                f"{fid}.png"
+                for fid in (getattr(track, "evidence_frame_ids", None) or track.frame_ids)
+            ],
             "provenance": [
                 f"gdino:{track.source}",
                 f"vlm:{vlm_model}",

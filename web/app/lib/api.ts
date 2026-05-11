@@ -118,24 +118,33 @@ export async function fetchPointsUrl(sceneId: string): Promise<string> {
   return getArtifactUrl(sceneId, "points.ply");
 }
 
-export function frameUrl(sceneId: string, frameName: string): string {
-  return getArtifactUrl(sceneId, `frames/${frameName}.jpg`);
-}
-
 /**
- * Frame URL for the evidence gallery. Unlike `frameUrl`, this trusts the
- * caller's filename verbatim — `Annotation.frame_ids` from the real
- * segmentation pipeline already includes the file extension (e.g.
- * `0001.png`), so we must not append another one.
+ * Frame URL for the evidence gallery. The segmentation lift writes a
+ * per-(track, frame) JPG cropped to the GDINO bbox (with padding) and
+ * downsized to ~384 px under `evidence/<annotation_id>/<frame_stem>.jpg`.
+ * The full-resolution `frames/` directory is intentionally NOT pulled
+ * back to the local disk anymore — these crops are the only frame
+ * imagery the UI ever needs.
+ *
+ * Annotation.frame_ids comes through with the `.png` extension (e.g.
+ * `0001.png`) for backwards compatibility, so we strip it before
+ * appending `.jpg`.
  */
-export function evidenceFrameUrl(sceneId: string, frameName: string): string {
-  return getArtifactUrl(sceneId, `frames/${frameName}`);
+export function evidenceFrameUrl(
+  sceneId: string,
+  annotationId: string,
+  frameName: string,
+): string {
+  const stem = frameName.replace(/\.[^./]+$/, "");
+  return getArtifactUrl(sceneId, `evidence/${annotationId}/${stem}.jpg`);
 }
 
 /**
- * Mask URL for the evidence gallery. Masks are written by
- * `segmentation.lift_masks._write_cluster_masks` as PNGs keyed by the
- * frame stem (no extension), so `0001.png` → `masks/<id>/0001.png`.
+ * Mask URL for the evidence gallery. Written by `segmentation.lift._write_track_evidence`
+ * as binary PNGs cropped to the same bbox+pad region (and resized to
+ * the same dimensions) as the matching evidence JPG, so the CSS
+ * `mask-image` overlay lines up 1:1. SAM 2.1 mask where the lift had
+ * one; bbox-fill rectangle on grid-fallback frames.
  */
 export function maskUrl(
   sceneId: string,

@@ -4,7 +4,11 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
-import { SettingsPanel, DEFAULT_SETTINGS } from "@/components/SettingsPanel";
+// Pipeline settings are intentionally hidden in the upload UI; the run uses
+// DEFAULT_SETTINGS and the user gets a stage-by-stage explanation instead.
+// import { SettingsPanel, DEFAULT_SETTINGS } from "@/components/SettingsPanel";
+import { DEFAULT_SETTINGS } from "@/components/SettingsPanel";
+import { PipelineOverview } from "@/components/PipelineOverview";
 import { Uploader } from "@/components/Uploader";
 import { TypingTitle } from "@/components/landing/TypingTitle";
 import { useUpload } from "@/hooks/useUpload";
@@ -13,7 +17,8 @@ import { submitJob } from "@/lib/api";
 export default function UploadPage() {
   const router = useRouter();
   const { state, start, reset } = useUpload();
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  // const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const settings = DEFAULT_SETTINGS;
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -56,11 +61,12 @@ export default function UploadPage() {
           </div>
 
           <div className="flex min-w-0 flex-col gap-5">
-            <SettingsPanel
+            {/* <SettingsPanel
               value={settings}
               onChange={setSettings}
               durationS={state.durationS}
-            />
+            /> */}
+            <PipelineOverview />
             <button
               type="button"
               onClick={onStart}

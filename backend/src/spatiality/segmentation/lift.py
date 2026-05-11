@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,11 @@ class LiftedTrack:
     point_count: int
     mean_conf: float
     frame_ids: list[str]
+    # Subset of frame_ids for which we wrote per-(track, frame) evidence to
+    # `evidence/<track_id>/<frame_id>.jpg` + `masks/<track_id>/<frame_id>.png`.
+    # Lane B writes this into annotation.frame_ids so the UI's evidence
+    # panel only ever requests frames that actually have crops on disk.
+    evidence_frame_ids: list[str] = field(default_factory=list)
     text_prompt: str | None = None
     source: str = "open_set"
 
@@ -657,6 +663,106 @@ def _multiview_visibility_keep(
     return keep_per_frame
 
 
+# Evidence crop: max longest-side pixels for the per-(track, frame) JPG +
+# matching binary mask PNG. ~384px keeps thumbnails sharp in the side
+# panel and lightbox while keeping per-scene evidence under ~10 MB.
+_EVIDENCE_MAX_DIM = 384
+# Padding (px) around the bbox before cropping. Gives the user enough
+# surrounding context to see the object in its setting rather than a
+# tightly-clipped silhouette.
+_EVIDENCE_BBOX_PAD = 24
+
+
+def _write_track_evidence(
+    track_id: str,
+    track_frames: list[TrackFrame],
+    frame_masks: dict[str, np.ndarray],
+    out_dir: Path,
+) -> list[str]:
+    """Write `evidence/<track_id>/<frame_id>.jpg` + `masks/<track_id>/<frame_id>.png`.
+
+    For each TrackFrame in ``track_frames`` (the post-stride / post-cap
+    subset that lift actually considered), crop the source frame to its
+    bbox+pad region, downsize to ``_EVIDENCE_MAX_DIM`` on the longest
+    side, and save a matched-resolution binary mask alongside. The mask
+    is the SAM mask cropped to the same region when available, else a
+    filled bbox rectangle so the UI still shows "what GDINO picked up"
+    on grid-fallback frames.
+
+    Returns the list of ``frame_id`` stems for which evidence was
+    actually written (skips frames whose PNG is missing or corrupt).
+    """
+    frames_dir = out_dir / "frames"
+    evidence_dir = out_dir / "evidence" / track_id
+    masks_dir = out_dir / "masks" / track_id
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    masks_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[str] = []
+    for tf in track_frames:
+        frame_png = frames_dir / f"{tf.frame_id}.png"
+        if not frame_png.exists():
+            continue
+        try:
+            img = Image.open(frame_png).convert("RGB")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("evidence skip %s/%s: cannot open frame (%s)",
+                           track_id, tf.frame_id, e)
+            continue
+        fw, fh = img.size
+        x0, y0, x1, y1 = (int(v) for v in tf.bbox_2d)
+        x0p = max(0, x0 - _EVIDENCE_BBOX_PAD)
+        y0p = max(0, y0 - _EVIDENCE_BBOX_PAD)
+        x1p = min(fw, x1 + _EVIDENCE_BBOX_PAD)
+        y1p = min(fh, y1 + _EVIDENCE_BBOX_PAD)
+        if x1p <= x0p or y1p <= y0p:
+            continue
+        crop = img.crop((x0p, y0p, x1p, y1p))
+        cw, ch = crop.size
+        scale = _EVIDENCE_MAX_DIM / float(max(cw, ch))
+        if scale < 1.0:
+            tw, th = max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))
+            crop = crop.resize((tw, th), Image.LANCZOS)
+        crop.save(evidence_dir / f"{tf.frame_id}.jpg", format="JPEG", quality=82)
+
+        # Mask: SAM (depth-resolution) if cached, else bbox-fill in
+        # frame coords. Resize to match crop dims so the CSS overlay
+        # lines up 1:1.
+        target_size = crop.size  # (w, h)
+        mask_arr = frame_masks.get(tf.frame_id)
+        if mask_arr is not None:
+            # SAM masks come back at depth resolution. Upsample to frame
+            # dims (nearest, preserves binary nature), then crop the same
+            # region we cropped the JPG with.
+            mh, mw = mask_arr.shape[:2]
+            if (mw, mh) != (fw, fh):
+                mask_img = Image.fromarray((mask_arr > 0).astype(np.uint8) * 255)
+                mask_img = mask_img.resize((fw, fh), Image.NEAREST)
+            else:
+                mask_img = Image.fromarray((mask_arr > 0).astype(np.uint8) * 255)
+            mask_crop = mask_img.crop((x0p, y0p, x1p, y1p))
+        else:
+            # Bbox-fill: white rect inside the bbox, black outside, in
+            # crop coords (NOT padded coords — we want the rectangle
+            # offset within the padding so the user can see context).
+            mask_crop = Image.new("L", (x1p - x0p, y1p - y0p), 0)
+            rect_x0 = max(0, x0 - x0p)
+            rect_y0 = max(0, y0 - y0p)
+            rect_x1 = min(x1p - x0p, x1 - x0p)
+            rect_y1 = min(y1p - y0p, y1 - y0p)
+            if rect_x1 > rect_x0 and rect_y1 > rect_y0:
+                from PIL import ImageDraw  # noqa: PLC0415
+                ImageDraw.Draw(mask_crop).rectangle(
+                    [rect_x0, rect_y0, rect_x1, rect_y1], fill=255,
+                )
+        if mask_crop.size != target_size:
+            mask_crop = mask_crop.resize(target_size, Image.NEAREST)
+        mask_crop.save(masks_dir / f"{tf.frame_id}.png", format="PNG", optimize=True)
+        written.append(tf.frame_id)
+
+    return written
+
+
 def _lift_discard_record(track: Track, *, reason: str, detail: str) -> dict:
     """Build a discard record for a track that failed 3D lifting.
 
@@ -746,6 +852,11 @@ def lift_track(
     # Per-frame collected data — drives the multi-view filter below.
     # Each entry: (track_frame, world_points (N,3), confidences (N,), source_mask (H,W) | None)
     per_frame: list[tuple[TrackFrame, np.ndarray, np.ndarray, np.ndarray | None]] = []
+    # Cached SAM masks per frame_id — captured during the per-frame loop
+    # and re-used at the end of lift_track to write per-(track, frame)
+    # evidence crops so the UI can show "what SAM saw" without re-running
+    # the predictor.
+    frame_masks: dict[str, np.ndarray] = {}
     n_mask_used = 0
     n_grid_fallback = 0
     for bundle in bundles:
@@ -788,6 +899,7 @@ def lift_track(
                     if len(ys):
                         n_mask_used += 1
                         source_mask = mask
+                        frame_masks[tf.frame_id] = mask
         if ys is None or not len(ys):
             ys, xs = _sample_grid_pixels(tf.bbox_2d, h, w)
             n_grid_fallback += 1
@@ -965,6 +1077,20 @@ def lift_track(
     weights_for_obb = C if (len(C) == len(P) and float(C.sum()) > 0) else None
     axes, extents, corners = _pca_obb(P, weights=weights_for_obb)
 
+    # Write per-(track, frame) evidence crops + masks for the UI. Uses
+    # the post-cap `frames` list — these are the frames lift actually
+    # considered and (where mask_predictor was alive) for which we
+    # cached SAM masks. The returned stems are what Lane B will surface
+    # in annotation.frame_ids so the UI only ever requests crops that
+    # exist on disk.
+    try:
+        evidence_frame_ids = _write_track_evidence(
+            track.track_id, frames, frame_masks, out_dir,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("evidence write failed for %s: %s", track.track_id, e)
+        evidence_frame_ids = []
+
     return LiftedTrack(
         track_id=track.track_id,
         centroid=centroid.astype(np.float32),
@@ -974,6 +1100,7 @@ def lift_track(
         point_count=int(P.shape[0]),
         mean_conf=float(C.mean()) if len(C) else 0.0,
         frame_ids=[f.frame_id for f in track.frames],
+        evidence_frame_ids=evidence_frame_ids,
         text_prompt=track.text_prompt,
         source=track.source,
     )
@@ -1022,10 +1149,43 @@ def _obb_diagonal(corners: np.ndarray) -> float:
     return float(np.linalg.norm(hi - lo))
 
 
+def _absorb_evidence(
+    out_dir: Path, canonical_id: str, loser_id: str,
+) -> None:
+    """Move evidence/masks files from a merged-loser into the canonical's dirs.
+
+    Per-(track, frame) JPGs and PNGs are keyed by track_id, so when two
+    tracks merge under the canonical id, the loser's crops would 404 in
+    the UI unless we re-key them. Moves (not copies) since the loser's
+    dir has no surviving consumer.
+    """
+    for kind in ("evidence", "masks"):
+        src = out_dir / kind / loser_id
+        if not src.is_dir():
+            continue
+        dst = out_dir / kind / canonical_id
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in src.iterdir():
+            target = dst / f.name
+            if target.exists():
+                # Canonical already has its own evidence for this frame —
+                # keep the canonical's (it was the higher-conf member).
+                continue
+            try:
+                shutil.move(str(f), str(target))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("evidence move failed %s → %s: %s", f, target, e)
+        try:
+            src.rmdir()
+        except OSError:
+            pass
+
+
 def merge_lifted_tracks(
     tracks: list[LiftedTrack],
     iou_threshold: float = _MERGE_AABB_IOU_THRESHOLD,
     centroid_fraction: float = _MERGE_CENTROID_FRACTION,
+    out_dir: Path | None = None,
 ) -> tuple[list[LiftedTrack], dict]:
     """Cluster LiftedTracks by 3D AABB IoU + centroid proximity.
 
@@ -1098,6 +1258,8 @@ def merge_lifted_tracks(
             if m == canonical_idx:
                 continue
             t = tracks[m]
+            if out_dir is not None:
+                _absorb_evidence(out_dir, canonical.track_id, t.track_id)
             merged_losers.append({
                 "id": t.track_id,
                 "label": t.text_prompt or t.track_id,
@@ -1131,6 +1293,9 @@ def merge_lifted_tracks(
         )
 
         all_frame_ids = sorted(set().union(*[set(tracks[m].frame_ids) for m in members]))
+        all_evidence_ids = sorted(set().union(
+            *[set(tracks[m].evidence_frame_ids) for m in members]
+        ))
         merged.append(LiftedTrack(
             track_id=canonical.track_id,
             centroid=centroid.astype(np.float32),
@@ -1140,6 +1305,7 @@ def merge_lifted_tracks(
             point_count=int(sum(tracks[m].point_count for m in members)),
             mean_conf=float(np.mean([tracks[m].mean_conf for m in members])),
             frame_ids=all_frame_ids,
+            evidence_frame_ids=all_evidence_ids,
             text_prompt=canonical.text_prompt,
             source="merged",
         ))
@@ -1211,7 +1377,7 @@ def run_lifting(
           f"({_time.time()-_t:.1f}s)", flush=True)
 
     _t_merge = _time.time()
-    merged, merge_stats = merge_lifted_tracks(lifted)
+    merged, merge_stats = merge_lifted_tracks(lifted, out_dir=out_dir)
     print(f"[lift] 3D OBB merge: {merge_stats['n_in']} → {merge_stats['n_out']} "
           f"(merged {merge_stats['merged']} duplicates @ IoU≥"
           f"{merge_stats['iou_threshold']} OR centroid_dist < "

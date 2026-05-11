@@ -51,8 +51,8 @@ def _artefact_root() -> Path:
 def _write_ply(path: Path, xyz: np.ndarray, rgb: np.ndarray, conf: np.ndarray) -> None:
     """Write a binary little-endian PLY: xyz float + rgb uchar + confidence float.
 
-    Matches the schema the web SplatViewer parser expects (see SplatViewer.tsx
-    PLY streaming parser around lines 1600–1850).
+    Matches the schema the web PointCloudViewer parser expects (the streaming
+    PLY parser in PointCloudViewer.tsx).
     """
     n = xyz.shape[0]
     header = (

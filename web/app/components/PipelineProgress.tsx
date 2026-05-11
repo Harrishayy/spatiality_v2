@@ -5,16 +5,15 @@ import { useUI } from "@/store/ui";
 
 type VisibleStage = "capture" | "poses" | "segmentation";
 
-// Visible stages in the panel. The internal "splat" stage (voxel-downsample
-// of VGGT surfels into the small splat.ply that segmentation clusters over)
-// is hidden — the viewer doesn't render that output and it's confusing to
-// surface to a user. Pipeline manifest still tracks it; we just don't show it.
+// Visible stages in the panel. The internal "splat" manifest stage is a
+// no-op placeholder (points.ply doubles as the splat source); we hide it
+// from the UI. The pipeline manifest still tracks it for backwards-compat.
 const STAGE_ORDER: VisibleStage[] = ["capture", "poses", "segmentation"];
 
 const LABEL: Record<keyof Manifest["stages"], string> = {
   capture: "Capture",
   poses: "Reconstruction (VGGT)",
-  splat: "Splat (cluster)",
+  splat: "Cloud",
   segmentation: "Segmentation",
 };
 
@@ -99,19 +98,19 @@ function Stats({
       ? `${used} / ${captured}`
       : `${captured}`;
 
-  const splatGaussiansRaw = manifest.stages.splat["gaussian_count"];
-  const splatGaussians =
-    typeof splatGaussiansRaw === "number" ? splatGaussiansRaw : null;
+  const manifestPointsRaw = manifest.stages.splat["gaussian_count"];
+  const manifestPoints =
+    typeof manifestPointsRaw === "number" ? manifestPointsRaw : null;
   let cloudLabel: string;
   let cloudValue: string;
   if (cloudStats) {
     cloudLabel = "points";
     cloudValue = `${formatPointCount(cloudStats.count)}`;
-  } else if (splatGaussians !== null) {
+  } else if (manifestPoints !== null) {
     cloudLabel = "points";
-    cloudValue = `${formatPointCount(splatGaussians)}`;
+    cloudValue = `${formatPointCount(manifestPoints)}`;
   } else {
-    cloudLabel = "splat";
+    cloudLabel = "cloud";
     cloudValue = `${manifest.stats.splat_size_mb.toFixed(0)} MB`;
   }
 

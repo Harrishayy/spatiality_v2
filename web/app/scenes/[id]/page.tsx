@@ -17,8 +17,8 @@ import { getArtifactUrl, HttpError } from "@/lib/api";
 import { useUI } from "@/store/ui";
 import type { Manifest, StageStatus } from "@/lib/types";
 
-const SplatViewer = dynamic(
-  () => import("@/components/SplatViewer").then((m) => m.SplatViewer),
+const PointCloudViewer = dynamic(
+  () => import("@/components/PointCloudViewer").then((m) => m.PointCloudViewer),
   { ssr: false },
 );
 
@@ -26,7 +26,7 @@ export default function ScenePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const sceneId = params?.id ?? "";
-  const { manifest, annotations, discarded, splatUrl, splatReady, segReady } = useScene(sceneId);
+  const { manifest, annotations, discarded, pointsUrl, pointsReady, segReady } = useScene(sceneId);
   const { messages, send } = useChat(sceneId);
   const selectedId = useUI((s) => s.selectedId);
   const [openSection, setOpenSection] = useState<SceneSection | null>(null);
@@ -51,10 +51,10 @@ export default function ScenePage() {
   const m = manifest.data;
   // Stable reference: react-query gives us the same array across renders when
   // data is unchanged; the ?? [] fallback used to mint a fresh array each
-  // render, which would tear down the SplatViewer on every poll.
+  // render, which would tear down the viewer on every poll.
   const annos = useMemo(() => annotations.data ?? [], [annotations.data]);
   const discardedAnnos = useMemo(() => discarded.data ?? [], [discarded.data]);
-  const emptySplat = (m?.stats.splat_size_mb ?? 0) <= 0.001;
+  const emptyCloud = (m?.stats.splat_size_mb ?? 0) <= 0.001;
   // Only pass a wireframeUrl when the manifest advertises one. The viewer
   // skips its artifact fetch otherwise (and falls back to voxel sampling),
   // which is what we want for scenes that never produced wireframe.ply.
@@ -70,22 +70,22 @@ export default function ScenePage() {
 
       <main className="relative flex min-h-0 flex-1">
         <section className="relative min-h-0 flex-1">
-          {splatReady && splatUrl.data ? (
-            <SplatViewer
-              splatUrl={splatUrl.data}
+          {pointsReady && pointsUrl.data ? (
+            <PointCloudViewer
+              pointsUrl={pointsUrl.data}
               annotations={annos}
-              emptySplat={emptySplat}
+              emptyCloud={emptyCloud}
               wireframeUrl={wireframeUrl}
             />
           ) : (
             <PipelinePending manifest={m} failed={failed} />
           )}
 
-          {splatReady && !segReady && segStatus !== "failed" && (
+          {pointsReady && !segReady && segStatus !== "failed" && (
             <SegmentingBanner status={segStatus} />
           )}
 
-          {splatReady && segStatus === "failed" && (
+          {pointsReady && segStatus === "failed" && (
             <FailedBanner
               title="Segmentation failed"
               detail={m?.errors?.[m.errors.length - 1]}

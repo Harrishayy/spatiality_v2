@@ -59,16 +59,9 @@ logger = logging.getLogger(__name__)
 # Each entry adds ~one phrase to the multi-phrase GDINO query, which
 # scales sub-linearly in the text encoder — wall-clock cost is negligible.
 _GLOBAL_SAFETY_NET: list[str] = [
-    "person",
-    "laptop",
-    "computer monitor",
-    "plush toy",
-    "stuffed animal",
     "door",
     "wardrobe",
     "closet",
-    "table lamp",
-    "book",
     "remote control",
     "ceiling light",
 ]

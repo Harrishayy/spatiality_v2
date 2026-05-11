@@ -173,15 +173,21 @@ def _push_inputs_to_modal(scene_id: str) -> None:
         batch.put_directory(str(src), f"/{scene_id}")
 
 
-def _pull_outputs_from_modal(scene_id: str) -> None:
+def _pull_outputs_from_modal(scene_id: str, exclude: set[str] | None = None) -> None:
     """Mirror Modal `spatiality-outputs`/<id>/ back to local data/outputs/<id>/.
 
     Walks the remote tree with ``Volume.iterdir`` and streams each file via
     ``Volume.read_file``. Done after every Modal stage so the local disk is
     always the source of truth the FastAPI artifact endpoint serves from.
+
+    ``exclude`` is a set of scene-relative paths (e.g. ``{"manifest.json"}``)
+    to skip. The poses→segmentation overlap pulls with manifest excluded so
+    the orchestrator's ``_bump_manifest`` writes during segmentation don't
+    race with Modal's manifest writes streaming back from the inference run.
     """
     import modal
 
+    skip = exclude or set()
     vol = modal.Volume.from_name(OUTPUTS_VOLUME, create_if_missing=True)
     dst_root = _scene_output_dir(scene_id)
     dst_root.mkdir(parents=True, exist_ok=True)
@@ -202,6 +208,8 @@ def _pull_outputs_from_modal(scene_id: str) -> None:
 
     for remote_path in files:
         rel = remote_path.lstrip("/")[len(scene_id) + 1:]  # strip "<id>/"
+        if rel in skip:
+            continue
         local_path = dst_root / rel
         local_path.parent.mkdir(parents=True, exist_ok=True)
         with local_path.open("wb") as f:
@@ -321,8 +329,6 @@ def _run_pipeline(scene_id: str, n_frames: int, infer_kwargs: dict | None = None
     try:
         infer_fn = modal.Function.from_name("spatiality-inference", "run_inference_one")
         infer_fn.remote(scene_id, frames_max=n_frames, **infer_kwargs)
-        _pull_outputs_from_modal(scene_id)
-        _recompute_stats(scene_id)
     except BaseException as exc:
         _bump_manifest(
             scene_id, "poses", "failed",
@@ -330,10 +336,55 @@ def _run_pipeline(scene_id: str, n_frames: int, infer_kwargs: dict | None = None
         )
         return
 
+    # Pull poses artifacts and run segmentation concurrently. Segmentation reads
+    # its inputs from the Modal volume, not from the local disk, so the pull is
+    # only for the laptop's artifact-serving role and can overlap with the seg
+    # call. Saves the wallclock cost of the ~5–8 min PLY+depth-map pull.
+    #
+    # The pull excludes manifest.json so it doesn't race with the orchestrator's
+    # `_bump_manifest("segmentation", "running")` below; the final pull at the
+    # end of the function picks up the canonical manifest from Modal.
+    pull_outcome: dict = {}
+
+    def _bg_pull_poses() -> None:
+        try:
+            _pull_outputs_from_modal(scene_id, exclude={"manifest.json"})
+            _recompute_stats(scene_id)
+        except BaseException as exc:
+            pull_outcome["error"] = exc
+
+    pull_thread = threading.Thread(target=_bg_pull_poses, daemon=True)
+    pull_thread.start()
+
+    seg_error: BaseException | None = None
     try:
         _bump_manifest(scene_id, "segmentation", "running")
         seg_fn = modal.Function.from_name("spatiality-segmentation", "run_segmentation_one")
         seg_fn.remote(scene_id)
+    except BaseException as exc:
+        seg_error = exc
+
+    # Always wait for the poses pull to finish before pulling segmentation
+    # outputs (avoids two threads writing the same files) and before reporting
+    # any failure.
+    pull_thread.join()
+
+    if seg_error is not None:
+        _bump_manifest(
+            scene_id, "segmentation", "failed",
+            top="failed", error=f"{type(seg_error).__name__}: {seg_error}",
+        )
+        return
+
+    if "error" in pull_outcome:
+        exc = pull_outcome["error"]
+        _bump_manifest(
+            scene_id, "poses", "failed",
+            top="failed", error=f"{type(exc).__name__}: {exc}",
+        )
+        return
+
+    try:
         _pull_outputs_from_modal(scene_id)
         _recompute_stats(scene_id)
     except BaseException as exc:

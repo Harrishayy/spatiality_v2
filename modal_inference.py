@@ -210,41 +210,37 @@ def _fresh_local_dir(input_id: str) -> Path:
 
 
 def _pull_outputs_to_local(input_id: str) -> int:
-    """Stream every file under `/<input_id>/` on the outputs volume into a
-    fresh sibling local directory. Returns count of files written.
+    """Mirror the remote scene outputs to a fresh sibling directory.
 
-    Each pull lands in
-    ``backend/data/outputs/<input_id>_<timestamp>/`` so prior runs at
-    ``<input_id>/`` (or earlier timestamped dirs) are never overwritten.
-
-    Mirror of `backend.main._pull_outputs_from_modal` — duplicated here
-    so the Modal local_entrypoint stays self-contained.
+    Shells out to ``modal volume get``, which downloads in parallel with
+    checksums. The previous serial loop over ``volume.read_file`` was
+    bottlenecked on per-file roundtrip latency for the 1500+ small depth /
+    frame artefacts produced by Stage 1.
     """
+    import shutil
+    import subprocess
+
     dst_root = _fresh_local_dir(input_id)
-
-    def _walk(remote_dir: str):
-        for entry in outputs_vol.iterdir(remote_dir):
-            # FileEntryType.DIRECTORY == 2 in the Modal SDK.
-            if getattr(entry, "type", None) and int(entry.type) == 2:
-                yield from _walk(entry.path)
-            else:
-                yield entry.path
-
-    try:
-        files = list(_walk(f"/{input_id}"))
-    except FileNotFoundError:
-        print(f"[pull] no remote dir /{input_id} on outputs volume", flush=True)
+    cmd = [
+        "modal", "volume", "get", "--force",
+        OUTPUTS_VOLUME, f"/{input_id}", str(dst_root),
+    ]
+    print(f"[pull] $ {' '.join(cmd)}", flush=True)
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        print(f"[pull] modal volume get exited rc={rc}", flush=True)
         return 0
 
-    written = 0
-    for remote_path in files:
-        rel = remote_path.lstrip("/")[len(input_id) + 1:]  # strip "<id>/"
-        local_path = dst_root / rel
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        with local_path.open("wb") as f:
-            for chunk in outputs_vol.read_file(remote_path):
-                f.write(chunk)
-        written += 1
+    # `modal volume get` puts contents under <dst_root>/<input_id>/ — flatten
+    # so the local layout matches the remote one (frames/, depth/, etc. live
+    # directly under dst_root, the way callers expect).
+    nested = dst_root / input_id
+    if nested.is_dir():
+        for child in nested.iterdir():
+            shutil.move(str(child), str(dst_root / child.name))
+        nested.rmdir()
+
+    written = sum(1 for _ in dst_root.rglob("*") if _.is_file())
     print(f"[pull] mirrored {written} file(s) → {dst_root}", flush=True)
     return written
 

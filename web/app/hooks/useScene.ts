@@ -21,10 +21,11 @@ import type {
 const POLL_MS = 2000;
 
 // VGGT outputs OpenCV-convention world coords (+Y down, +Z forward). The
-// SplatViewer parser flips Y and Z on every point so the cloud renders
-// right-side-up in Three.js (+Y up, +Z toward camera). Annotation centroids
-// and bboxes — and now Lane E edges and Lane F walls / doors / windows —
-// are produced in the same world frame upstream, so they need the same flip.
+// point cloud viewer's parser flips Y and Z on every point so the cloud
+// renders right-side-up in Three.js (+Y up, +Z toward camera). Annotation
+// centroids and bboxes — and now Lane E edges and Lane F walls / doors /
+// windows — are produced in the same world frame upstream, so they need
+// the same flip.
 function flipPoint(p: Vec3): Vec3 {
   return [p[0], -p[1], -p[2]];
 }
@@ -81,7 +82,7 @@ export function useScene(sceneId: string) {
     },
   });
 
-  const splatReady = manifest.data?.stages.splat.status === "complete";
+  const pointsReady = manifest.data?.stages.splat.status === "complete";
   const segReady = manifest.data?.stages.segmentation.status === "complete";
 
   // Lane is part of the cache key so switching lanes triggers a refetch.
@@ -105,10 +106,10 @@ export function useScene(sceneId: string) {
   const edges: SceneEdge[] | undefined = lanePayload.data?.edges;
   const layout: SpatialLayout | undefined = lanePayload.data?.layout;
 
-  const splatUrl = useQuery({
-    queryKey: ["splatUrl", sceneId],
+  const pointsUrl = useQuery({
+    queryKey: ["pointsUrl", sceneId],
     queryFn: () => fetchPointsUrl(sceneId),
-    enabled: splatReady,
+    enabled: pointsReady,
   });
 
   // Postprocess-dropped Lane B tracks (scene labels, low-conf, oversize,
@@ -136,10 +137,10 @@ export function useScene(sceneId: string) {
     discarded,
     edges,
     layout,
-    splatUrl,
-    splatReady,
+    pointsUrl,
+    pointsReady,
     segReady,
-    ready: splatReady,
+    ready: pointsReady,
     lane,
   };
 }

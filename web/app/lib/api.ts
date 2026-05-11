@@ -113,9 +113,8 @@ export async function fetchAnnotations(
 
 export async function fetchPointsUrl(sceneId: string): Promise<string> {
   // The viewer parser is hard-coded for points.ply (xyz + uchar rgb +
-  // optional confidence). splat.ply uses INRIA's f_dc_* SH coefficients and
-  // is consumed by the segmentation lift / mask projection only — never by
-  // the web viewer.
+  // optional confidence) — the dense colour point cloud produced by
+  // FlashVGGT at the end of the poses stage.
   return getArtifactUrl(sceneId, "points.ply");
 }
 

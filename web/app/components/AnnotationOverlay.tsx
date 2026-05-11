@@ -1,10 +1,11 @@
 "use client";
 
 /**
- * 3D-anchored HTML billboards. We avoid CSS2DRenderer because the splat
- * viewer manages its own renderer and adding another DOM-mounted Three.js
- * object can fight for the same canvas. Instead: project each annotation's
- * centroid to screen space every frame and absolute-position a div.
+ * 3D-anchored HTML billboards. We avoid CSS2DRenderer because the point
+ * cloud viewer manages its own renderer and adding another DOM-mounted
+ * Three.js object can fight for the same canvas. Instead: project each
+ * annotation's centroid to screen space every frame and absolute-position
+ * a div.
  */
 
 import { useEffect, useRef } from "react";

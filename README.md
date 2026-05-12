@@ -29,9 +29,22 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
 
 ## Try it
 
-<!-- TODO(maintainer): paste hosted demo link once deployed. -->
-- **Hosted demo**: _(coming)_ — orbit a pre-computed scene with labels and free-space overlay live in your browser, no install.
-- **Run it yourself**: see [Run it locally](#run-it-locally) below.
+<!-- TODO(maintainer): replace this placeholder with the deployed URL. -->
+- **Hosted demo**: _(coming — paste Vercel URL here)_ — opens on
+  `/scenes/demo_piece`, no install, no Modal, no FastAPI. The full scene
+  (1.3 GB `points.ply` plus all annotations, traversability, evidence
+  crops, and masks) lives in a Cloudflare R2 bucket; the deployed site
+  routes the viewer's manifest + artefact fetches to R2 via the
+  `NEXT_PUBLIC_DEMO_CDN_URL` rewrite in
+  [`web/next.config.mjs`](web/next.config.mjs). No demo data is committed
+  to the repo. Same URL works locally with the same env var set:
+  `cd web && NEXT_PUBLIC_DEMO_CDN_URL=https://<bucket>.r2.dev pnpm dev`.
+- **Download the full demo scene for offline use** (optional, ≈ 1.3 GB):
+  _(coming — paste GitHub Release link to `demo_piece_full.zip`)_.
+  Unzip into `backend/data/outputs/demo_piece/` and run the local FastAPI
+  orchestrator (`uvicorn backend.main:app --port 8765`) to view at full
+  quality without R2.
+- **Run it yourself on your own scene**: see [Run it locally](#run-it-locally) below.
 - **What you get** — at the end of a run, in `backend/data/outputs/<scene_id>/`:
 
   ```
@@ -238,10 +251,11 @@ scripts/
   run_local_gpu.py         Local-CUDA end-to-end driver (no Modal — experimental)
   install_local_gpu.sh     Installer for the local-GPU dependency set
   demo.sh                  One-command demo driver (Modal path)
+  build_demo_scene.py      Bake demo_piece into dist/ (R2 upload dir + offline zip)
 backend/
   requirements-local-gpu.txt  Pip set for the local-GPU path
-web/                       Next.js viewer
-docs/                      Reviewer notes, research notes
+web/                       Next.js viewer (rewrites demo_piece URLs to R2)
+docs/                      Reviewer notes
 patches/                   FlashVGGT upstream-pyproject carry
 ```
 

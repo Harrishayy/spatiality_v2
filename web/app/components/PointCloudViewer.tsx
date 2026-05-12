@@ -33,9 +33,11 @@ import {
   LineSegments,
   PerspectiveCamera,
   Points,
+  Raycaster,
   Scene,
   ShaderMaterial,
   Spherical,
+  Vector2,
   Vector3,
   WebGLRenderer,
 } from "three";
@@ -276,8 +278,10 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
     flyToRef.current = {
       target: a.centroid as [number, number, number],
       // Pull camera in proportional to the object's extent — small things =
-      // close-up, big things = farther back.
-      radius: Math.max(0.18, ext * 2.2),
+      // close-up, big things = farther back. Multiplier kept under 1 so the
+      // camera lands inside/at the surface of the bbox; the previous 2.2×
+      // floated too far out to inspect interiors.
+      radius: Math.max(0.06, ext * 0.85),
     };
   }, [selectedId]);
 
@@ -392,6 +396,32 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
         sph.radius = Math.max(0.05, Math.min(40, sph.radius * factor));
       };
       const onContextMenu = (e: MouseEvent) => e.preventDefault();
+      // Double-click to recenter the orbit target on the picked point. We
+      // raycast against the streaming Points cloud; the threshold is tuned
+      // generously vs. the rendered point size so picking works even when
+      // the cursor lands between sparse pixels.
+      const raycaster = new Raycaster();
+      const ndc = new Vector2();
+      raycaster.params.Points = { threshold: 0.02 };
+      const onDoubleClick = (e: MouseEvent) => {
+        const cloud = cloudRef.current;
+        if (!cloud) return;
+        const rect = dom.getBoundingClientRect();
+        ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(ndc, camera);
+        // Scale the picking threshold with the current orbit radius so the
+        // user gets a similar hit-area whether zoomed in or out.
+        raycaster.params.Points!.threshold = Math.max(0.005, sph.radius * 0.01);
+        const hits = raycaster.intersectObject(cloud, false);
+        if (hits.length === 0) return;
+        const p = hits[0].point;
+        flyToRef.current = {
+          target: [p.x, p.y, p.z],
+          // Preserve current zoom — only the pivot moves.
+          radius: sph.radius,
+        };
+      };
       // True when focus is in a text field — chat input, modal, etc. WASD
       // and friends would otherwise scroll the camera every time the user
       // typed an "a" or "s".
@@ -446,6 +476,7 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
       window.addEventListener("pointerup", onUp);
       dom.addEventListener("wheel", onWheel, { passive: false });
       dom.addEventListener("contextmenu", onContextMenu);
+      dom.addEventListener("dblclick", onDoubleClick);
       window.addEventListener("keydown", onKey);
       // Any user interaction → schedule a render.
       dom.addEventListener("pointerdown", markDirty);
@@ -613,6 +644,7 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
         window.removeEventListener("pointerup", onUp);
         dom.removeEventListener("wheel", onWheel);
         dom.removeEventListener("contextmenu", onContextMenu);
+        dom.removeEventListener("dblclick", onDoubleClick);
         window.removeEventListener("keydown", onKey);
         window.removeEventListener("resize", onResize);
         dom.removeEventListener("pointerdown", markDirty);
@@ -1179,6 +1211,8 @@ function ViewerToolbar() {
   const cycleRenderMode = useUI((s) => s.cycleRenderMode);
   const showAnnotations = useUI((s) => s.showAnnotations);
   const toggleAnnotations = useUI((s) => s.toggleAnnotations);
+  const showFreespace = useUI((s) => s.showFreespace);
+  const toggleFreespace = useUI((s) => s.toggleFreespace);
   const modeLabel =
     renderMode === "depth" ? "Depth" : renderMode === "confidence" ? "Confidence" : "RGB";
 
@@ -1201,6 +1235,17 @@ function ViewerToolbar() {
         title="Show/hide object markers and labels"
       >
         {showAnnotations ? "● Annotations" : "Annotations"}
+      </button>
+      <button
+        onClick={toggleFreespace}
+        className={`rounded-md border px-2.5 py-1 font-mono text-[11px] backdrop-blur ${
+          showFreespace
+            ? "border-accent-400/80 bg-accent-500/15 text-accent-100"
+            : "border-ink-700/70 bg-ink-900/85 text-ink-100 hover:border-accent-400/60 hover:text-accent-200"
+        }`}
+        title="Show/hide the humanoid traversability grid (Stage 5)"
+      >
+        {showFreespace ? "● Free space" : "Free space"}
       </button>
     </div>
   );
@@ -1231,6 +1276,7 @@ function ControlsHint({
             </div>
             <ul className="space-y-0.5">
               <li><kbd className="font-mono opacity-80">drag</kbd> orbit</li>
+              <li><kbd className="font-mono opacity-80">dbl-click</kbd> recenter on point</li>
               <li><kbd className="font-mono opacity-80">shift+drag</kbd> / right-drag — pan</li>
               <li><kbd className="font-mono opacity-80">wheel</kbd> zoom</li>
               <li><kbd className="font-mono opacity-80">W A S D</kbd> move target</li>

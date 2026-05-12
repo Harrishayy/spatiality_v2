@@ -34,7 +34,7 @@ Auth via existing Modal Secrets:
                           aliased at runtime onto PYDANTIC_AI_GATEWAY_API_KEY
                           for scout + Lanes B/E (model id `gateway/gemini:...`).
 
-Run: ``modal run modal_segmentation.py::main --input-id <id>``
+Run: ``modal run backend/modal/segmentation.py::main --input-id <id>``
 """
 
 from __future__ import annotations
@@ -45,7 +45,9 @@ import modal
 
 # ---------------------------------------------------------------------------- paths
 
-REPO = Path(__file__).resolve().parent
+# This file lives at <repo>/backend/modal/segmentation.py — parents[2] is the
+# repo root that contains backend/, patches/, web/, …
+REPO = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO / "backend" / "src"
 
 INPUTS_VOLUME = "spatiality-inputs"
@@ -268,14 +270,14 @@ def _pull_outputs_to_local(input_id: str) -> int:
 
 @app.local_entrypoint()
 def main(input_id: str = "", all: bool = False, lanes: str = "") -> None:
-    """``modal run modal_segmentation.py::main --input-id <id>`` or ``--all``.
+    """``modal run backend/modal/segmentation.py::main --input-id <id>`` or ``--all``.
 
     ``--lanes`` accepts a comma-separated subset of ``b,e,f`` (default: all).
     """
     if all:
         raise SystemExit("--all not implemented yet; pass --input-id <id>")
     if not input_id:
-        raise SystemExit("usage: modal run modal_segmentation.py::main --input-id <id>")
+        raise SystemExit("usage: modal run backend/modal/segmentation.py::main --input-id <id>")
 
     kwargs: dict = {}
     if lanes:

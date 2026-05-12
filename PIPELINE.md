@@ -76,8 +76,8 @@ backend/
       render.py                point-cloud orbital / top-down rasteriser
       vlm.py                   Gemini wrapper (PydanticAI)
 
-modal_inference.py             Modal app: spatiality-inference
-modal_segmentation.py          Modal app: spatiality-segmentation
+backend/modal/inference.py     Modal app: spatiality-inference
+backend/modal/segmentation.py  Modal app: spatiality-segmentation
 ```
 
 The laptop runs FastAPI; the GPU work runs in two Modal apps that get invoked via `modal.Function.from_name(...).remote(...)`.
@@ -541,6 +541,40 @@ The stage is **idempotent**: if `annotations.c.json` already exists, it's return
 
 &nbsp;
 
+## 4½. Stage 5: Free-space / traversability map (Modal CPU)
+
+Stage 5 turns "a labelled 3D scene" into "something a locomotion planner can consume." It runs at the end of segmentation on CPU (numpy + Pillow only), uses no models, and is non-fatal — if it raises, Lanes B/C labels still ship as the primary product.
+
+**Inputs:** `points.ply`, `cameras.json`.
+
+**What it does** (`backend/src/spatiality/nav/freespace.py`):
+
+1. **Recover scene up.** Each camera's image-y axis (`[0, -1, 0]` in camera space) is mapped through `Rᵀ` into world coordinates. Averaging across all cameras gives a stable gravity estimate — more robust than either "−y in world" (only true if frame 0 is level) or PCA of the cloud (gets confused by tall obstacles).
+2. **Pick an in-plane basis.** Two orthonormal axes `(u, v)` perpendicular to `up` so the grid's rows/cols are aligned with the captured space's natural orientation.
+3. **Estimate the floor.** Project every point onto `up`, then take the densest 5 cm band near the 2nd-percentile height. Single-point outliers under the floor don't move the estimate.
+4. **Slice into robot-body bands.** Heights above the floor are bucketed as `ankle 0.05–0.20 m`, `knee 0.20–0.60 m`, `hip 0.60–1.20 m`, `head 1.20–1.80 m`. Tuned for a generic ~1.7 m humanoid.
+5. **Rasterise.** XY footprint at 5 cm cells (≈ the underlying depth-map resolution for indoor captures). Per cell, count points in each band.
+6. **Classify each cell.**
+   - `traversable` = floor support in the ankle band AND no points in `[ankle, head]` after inflating obstacles by the robot's body radius (default 0.25 m, Minkowski-dilated).
+   - `obstacle` = any point in the ankle-to-head column.
+   - `unknown` = neither floor support nor obstacle (no info).
+7. **Tighten the grid** to the bounding box of any non-unknown cells + a 10-cell margin.
+
+**Outputs:**
+
+- `traversability.json` — `{cell_size_m, grid_shape, origin_uv_m, floor_height_world, up_axis_world, u_axis_world, v_axis_world, camera_center_uv_m, robot_radius_m, bands_m, stats: {traversable_m2, obstacle_m2, …}, cells_b64: base64(uint8 grid)}`. Cell labels are stable integers (`0=unknown, 1=traversable, 2=obstacle`) so the frontend can render a 3D plane overlay later without re-reading the spec.
+- `traversability.png` — top-down preview with green/coral cells + the camera-track polyline overlaid. This is what the viewer's "Free space" toggle surfaces today.
+
+**Why CPU and why now**: depth maps + points already encode all the geometry needed; the only computer-visiony step (floor extraction) is robust statistics. Wall-clock is ~5–15 s on a 50 M-point cloud; cost is zero (no API calls). It's wired into `segmentation.run` after Lane C so it never blocks the labels' completion.
+
+The frontend reads `manifest.artifacts.traversability_png` / `traversability_json`; absence means the stage didn't run (e.g. older scenes) and the viewer falls back to "Stage 5 hasn't run" copy in the Free-space card.
+
+&nbsp;
+
+---
+
+&nbsp;
+
 ## 5. Coordinate conventions
 
 We standardise on **OpenCV camera convention** end-to-end:
@@ -659,7 +693,11 @@ The frontend's poll sees `status: "failed"`, stops spinning, and shows the error
 
 ## 10. Running the pipeline
 
-The user runs the local services:
+Two execution paths. Path A is the supported one; Path B exists so anyone with their own CUDA box can skip Modal.
+
+### Path A — Modal (the path the rest of this doc describes)
+
+The laptop runs the local services:
 
 ```bash
 # backend (port 8765)
@@ -681,11 +719,29 @@ GET  /artifacts/scenes/<id>/<rel_path>   ← serves points.ply, frames, annotati
 Direct GPU re-runs (skipping the upload path) are also possible:
 
 ```bash
-modal run modal_inference.py::main    --input-id <scene_id>
-modal run modal_segmentation.py::main --input-id <scene_id> [--lanes b,c]
+modal run backend/modal/inference.py::main    --input-id <scene_id>
+modal run backend/modal/segmentation.py::main --input-id <scene_id> [--lanes b,c]
 ```
 
 Both `--local_entrypoint`s pull the outputs back into a fresh `backend/data/outputs/<scene_id>_<timestamp>/` so prior runs are never overwritten.
+
+### Path B — Local CUDA GPU (no Modal) — ⚠️ experimental, untested
+
+For someone with their own GPU who doesn't want a Modal account. **This path was authored on macOS and has not been smoke-tested on real CUDA hardware** — every dependency and env-var choice is inferred from the working Modal image builds in [`../backend/modal/`](../backend/modal/). If anything errors, treat those two files as the source of truth.
+
+```bash
+# one-time install (FlashVGGT applies the patched pyproject from patches/)
+bash scripts/install_local_gpu.sh
+
+# put your video at backend/data/inputs/<scene_id>/source.mp4
+python scripts/run_local_gpu.py <scene_id>
+
+# (optional) view in the web UI — the FastAPI server just serves files
+uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload
+cd web && pnpm dev  # http://localhost:3000/scenes/<scene_id>
+```
+
+The local-GPU runner sets `SPATIALITY_DATA_ROOT=backend/data/inputs` and `SPATIALITY_ARTEFACTS_ROOT=backend/data/outputs`, then calls `spatiality.inference.run` and `spatiality.segmentation.run` in-process — the same entry points Modal's `run_inference_one` / `run_segmentation_one` wrappers delegate to. The web viewer is identical either way: it just reads `backend/data/outputs/<scene_id>/`.
 
 &nbsp;
 

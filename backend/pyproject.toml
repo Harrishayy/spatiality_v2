@@ -4,8 +4,9 @@ version = "0.0.0"
 description = "Spatiality v2 backend — inference + segmentation pipelines."
 requires-python = ">=3.12"
 # Heavy GPU runtime deps live in the Modal images
-# (modal_inference.py / modal_segmentation.py). The deps below are what the
-# *local* FastAPI orchestrator (backend/main.py) needs to run on the laptop.
+# (backend/modal/inference.py / backend/modal/segmentation.py). The deps
+# below are what the *local* FastAPI orchestrator (backend/main.py) needs to
+# run on the laptop.
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",

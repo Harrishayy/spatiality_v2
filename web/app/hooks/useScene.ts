@@ -11,10 +11,7 @@ import type {
   Annotation,
   BBox,
   DiscardedAnnotation,
-  LanePayload,
   Lane,
-  SceneEdge,
-  SpatialLayout,
   Vec3,
 } from "@/lib/types";
 
@@ -23,9 +20,8 @@ const POLL_MS = 2000;
 // VGGT outputs OpenCV-convention world coords (+Y down, +Z forward). The
 // point cloud viewer's parser flips Y and Z on every point so the cloud
 // renders right-side-up in Three.js (+Y up, +Z toward camera). Annotation
-// centroids and bboxes — and now Lane E edges and Lane F walls / doors /
-// windows — are produced in the same world frame upstream, so they need
-// the same flip.
+// centroids and bboxes are produced in the same world frame upstream, so
+// they need the same flip.
 function flipPoint(p: Vec3): Vec3 {
   return [p[0], -p[1], -p[2]];
 }
@@ -39,24 +35,6 @@ function flipBBox(b: BBox): BBox {
 }
 function flipAnnotation(a: Annotation): Annotation {
   return { ...a, centroid: flipPoint(a.centroid), bbox: flipBBox(a.bbox) };
-}
-function flipLayout(layout: SpatialLayout): SpatialLayout {
-  return {
-    walls: layout.walls.map((w) => ({
-      a: flipPoint(w.a),
-      b: flipPoint(w.b),
-      height: w.height,
-    })),
-    doors: layout.doors.map((d) => ({ center: flipPoint(d.center), extent: d.extent })),
-    windows: layout.windows.map((w) => ({ center: flipPoint(w.center), extent: w.extent })),
-  };
-}
-function flipPayload(payload: LanePayload): LanePayload {
-  return {
-    annotations: payload.annotations.map(flipAnnotation),
-    edges: payload.edges,
-    layout: payload.layout ? flipLayout(payload.layout) : undefined,
-  };
 }
 
 export function useScene(sceneId: string) {
@@ -88,23 +66,14 @@ export function useScene(sceneId: string) {
   // Lane is part of the cache key so switching lanes triggers a refetch.
   // The fetcher applies the y/z flip once; downstream consumers see the
   // viewer-frame payload directly.
-  const lanePayload = useQuery({
-    queryKey: ["lane-payload", sceneId, lane],
-    queryFn: async () => flipPayload(await fetchLanePayload(sceneId, lane)),
-    enabled: segReady,
-  });
-
-  // Same cache entry, surfaced via `select` so the existing `annotations.data`
-  // call sites still work and we don't fake-cast a UseQueryResult shape.
   const annotations = useQuery({
     queryKey: ["lane-payload", sceneId, lane],
-    queryFn: async () => flipPayload(await fetchLanePayload(sceneId, lane)),
+    queryFn: async () => {
+      const p = await fetchLanePayload(sceneId, lane);
+      return p.annotations.map(flipAnnotation);
+    },
     enabled: segReady,
-    select: (p: LanePayload): Annotation[] => p.annotations,
   });
-
-  const edges: SceneEdge[] | undefined = lanePayload.data?.edges;
-  const layout: SpatialLayout | undefined = lanePayload.data?.layout;
 
   const pointsUrl = useQuery({
     queryKey: ["pointsUrl", sceneId],
@@ -135,12 +104,8 @@ export function useScene(sceneId: string) {
     manifest,
     annotations,
     discarded,
-    edges,
-    layout,
     pointsUrl,
     pointsReady,
     segReady,
-    ready: pointsReady,
-    lane,
   };
 }

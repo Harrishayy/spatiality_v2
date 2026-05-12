@@ -14,7 +14,7 @@ confidence + per-frame camera intrinsics/extrinsics, and emits:
 Coordinate convention on disk: OpenCV (+y down, +z forward). The web viewer
 already negates y/z while parsing, so do not pre-flip here.
 
-Run: ``modal run modal_inference.py::main --input-id <id>``
+Run: ``modal run backend/modal/inference.py::main --input-id <id>``
 """
 
 from __future__ import annotations
@@ -25,7 +25,9 @@ import modal
 
 # ---------------------------------------------------------------------------- paths
 
-REPO = Path(__file__).resolve().parent
+# This file lives at <repo>/backend/modal/inference.py — parents[2] is the
+# repo root that contains backend/, patches/, web/, …
+REPO = Path(__file__).resolve().parents[2]
 SRC_DIR = REPO / "backend" / "src"
 
 INPUTS_VOLUME = "spatiality-inputs"
@@ -187,8 +189,8 @@ def run_inference_one(input_id: str, **kwargs) -> dict:
 # Where the FastAPI server (backend/main.py) reads scene artifacts from. We
 # mirror the Modal outputs volume here so /scenes/<id> works the same whether
 # the run was kicked off via POST /api/jobs (which already pulls) or via
-# `modal run modal_inference.py::main` (which previously left the data on the
-# remote volume and required a manual `modal volume get`).
+# `modal run backend/modal/inference.py::main` (which previously left the
+# data on the remote volume and required a manual `modal volume get`).
 _LOCAL_OUTPUTS_ROOT = REPO / "backend" / "data" / "outputs"
 
 
@@ -247,11 +249,11 @@ def _pull_outputs_to_local(input_id: str) -> int:
 
 @app.local_entrypoint()
 def main(input_id: str = "", all: bool = False) -> None:
-    """``modal run modal_inference.py::main --input-id <id>`` or ``--all``."""
+    """``modal run backend/modal/inference.py::main --input-id <id>`` or ``--all``."""
     if all:
         raise SystemExit("--all not implemented yet; pass --input-id <id>")
     if not input_id:
-        raise SystemExit("usage: modal run modal_inference.py::main --input-id <id>")
+        raise SystemExit("usage: modal run backend/modal/inference.py::main --input-id <id>")
 
     result = run_inference_one.remote(input_id)
     print(result)

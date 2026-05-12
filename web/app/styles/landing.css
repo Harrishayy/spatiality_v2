@@ -328,7 +328,7 @@ button { font: inherit; }
 }
 .lp-side-section-head { padding: 0; }
 
-/* Form primitives — used by SettingsPanel + Uploader */
+/* Form primitives — used by Uploader */
 .lp-field {
   display: flex;
   flex-direction: column;

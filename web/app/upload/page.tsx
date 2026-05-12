@@ -6,7 +6,6 @@ import Link from "next/link";
 
 // Pipeline settings are intentionally hidden in the upload UI; the run uses
 // DEFAULT_SETTINGS and the user gets a stage-by-stage explanation instead.
-// import { SettingsPanel, DEFAULT_SETTINGS } from "@/components/SettingsPanel";
 import { DEFAULT_SETTINGS } from "@/components/SettingsPanel";
 import { PipelineOverview } from "@/components/PipelineOverview";
 import { Uploader } from "@/components/Uploader";
@@ -17,7 +16,6 @@ import { submitJob } from "@/lib/api";
 export default function UploadPage() {
   const router = useRouter();
   const { state, start, reset } = useUpload();
-  // const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const settings = DEFAULT_SETTINGS;
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);

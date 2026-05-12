@@ -116,6 +116,8 @@ export interface Manifest {
     annotations_json?: string;
     thumbnail_jpg?: string;
     cameras_json?: string;
+    traversability_json?: string;
+    traversability_png?: string;
   };
   stats: {
     frame_count: number;
@@ -149,56 +151,6 @@ export interface JobSettings {
   vlm_model: VlmModelId;
 }
 
-// Cost is "per call" est. for a 7-image grid (Gemini Flash family is roughly
-// 5–10× cheaper than Claude Sonnet at our typical token counts).
-export const VLM_MODEL_OPTIONS = [
-  { id: "gemini-2.5-flash" as VlmModelId,      label: "Gemini 2.5 Flash",       cost: "$0.0006" },
-  { id: "gemini-2.5-flash-lite" as VlmModelId, label: "Gemini 2.5 Flash-Lite",  cost: "$0.0002" },
-  { id: "claude-haiku-4-5" as VlmModelId,      label: "Claude Haiku 4.5",       cost: "$0.001" },
-  { id: "claude-sonnet-4-6" as VlmModelId,     label: "Claude Sonnet 4.6",      cost: "$0.003" },
-  { id: "claude-opus-4-7" as VlmModelId,       label: "Claude Opus 4.7",        cost: "$0.015" },
-] as const;
-
-export interface GatewayHealth {
-  ok: boolean;
-  key_set: boolean;
-  region: "eu" | "us" | "unknown";
-  probe_status: number | null;
-  latency_ms: number;
-}
-
-export interface TraceTreeNode {
-  span_id: string;
-  parent_span_id: string | null;
-  span_name: string;
-  start_timestamp: string;
-  end_timestamp: string;
-  /** Span wall-clock duration. The agent sends seconds in `duration` —
-   *  `duration_ms` lingers from older builds where milliseconds was the
-   *  only field; both are accepted via `nodeDurationS`. */
-  duration?: number;
-  duration_ms?: number;
-  trace_id: string;
-  attributes: Record<string, unknown>;
-  children: TraceTreeNode[];
-}
-
-/** Resolve a span node's duration in seconds. Returns null when neither
- *  `duration` (seconds) nor `duration_ms` (milliseconds) is a finite
- *  number — so the UI can render `—` instead of `NaN s`. */
-export function nodeDurationS(node: {
-  duration?: number;
-  duration_ms?: number;
-}): number | null {
-  if (typeof node.duration === "number" && Number.isFinite(node.duration)) {
-    return node.duration;
-  }
-  if (typeof node.duration_ms === "number" && Number.isFinite(node.duration_ms)) {
-    return node.duration_ms / 1000;
-  }
-  return null;
-}
-
 export interface CostAggregate {
   total_usd: number;
   call_count: number;
@@ -208,11 +160,4 @@ export interface CostAggregate {
     tokens_in: number;
     tokens_out: number;
   }>;
-}
-
-export interface TraceResponse {
-  scene_id: string;
-  span_count: number;
-  tree: TraceTreeNode[];
-  cost: CostAggregate;
 }

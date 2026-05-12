@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
+import { FreespaceCard } from "@/components/FreespaceCard";
 import { Header } from "@/components/Header";
 import { PipelineProgress } from "@/components/PipelineProgress";
 import {
@@ -29,6 +30,7 @@ export default function ScenePage() {
   const { manifest, annotations, discarded, pointsUrl, pointsReady, segReady } = useScene(sceneId);
   const { messages, send } = useChat(sceneId);
   const selectedId = useUI((s) => s.selectedId);
+  const showFreespace = useUI((s) => s.showFreespace);
   const [openSection, setOpenSection] = useState<SceneSection | null>(null);
 
   // Stale scene_id (deleted on disk, often comes from localStorage pointing
@@ -83,6 +85,10 @@ export default function ScenePage() {
               title="Segmentation failed"
               detail={m?.errors?.[m.errors.length - 1]}
             />
+          )}
+
+          {pointsReady && showFreespace && m && (
+            <FreespaceCard sceneId={sceneId} manifest={m} />
           )}
 
           {m && (

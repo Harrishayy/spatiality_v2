@@ -34,7 +34,6 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,7 +59,7 @@ DEFAULT_FRAMES = 500  # target frames AFTER preprocessing — what FlashVGGT act
 # safety so a slightly under-shooting ffmpeg still leaves ≥DEFAULT_FRAMES.
 _EXTRACT_OVERSAMPLE = 1.30
 
-# Modal volume names — must match modal_inference.py / modal_segmentation.py.
+# Modal volume names — must match backend/modal/inference.py / segmentation.py.
 INPUTS_VOLUME = "spatiality-inputs"
 OUTPUTS_VOLUME = "spatiality-outputs"
 
@@ -212,9 +211,14 @@ _PULL_SKIP_PREFIXES: tuple[str, ...] = (
 def _pull_outputs_from_modal(scene_id: str, exclude: set[str] | None = None) -> None:
     """Mirror Modal `spatiality-outputs`/<id>/ back to local data/outputs/<id>/.
 
-    Walks the remote tree with ``Volume.iterdir`` and streams each file via
-    ``Volume.read_file``. Done after every Modal stage so the local disk is
-    always the source of truth the FastAPI artifact endpoint serves from.
+    Issues a single recursive ``Volume.iterdir`` on the scene root and streams
+    each file via ``Volume.read_file``. Done after every Modal stage so the
+    local disk is always the source of truth the FastAPI artifact endpoint
+    serves from.
+
+    A single recursive listing avoids the ``VolumeListFiles`` rate limit that
+    a per-directory walk hit once ``evidence/obj_NNNN/`` produced 50+ subdirs
+    per scene — one listing RPC replaces N per-subdir RPCs.
 
     Skips pipeline-internal artefacts (see ``_PULL_SKIP_PREFIXES``) that
     have no local consumer — these stay on the Modal volume where the next
@@ -232,34 +236,17 @@ def _pull_outputs_from_modal(scene_id: str, exclude: set[str] | None = None) -> 
     dst_root = _scene_output_dir(scene_id)
     dst_root.mkdir(parents=True, exist_ok=True)
 
-    def _walk(remote_dir: str) -> Iterator[str]:
-        for entry in vol.iterdir(remote_dir):
-            # FileEntryType.DIRECTORY == 2 in the Modal SDK.
-            is_dir = getattr(entry, "type", None) and int(entry.type) == 2
-            # Skip dirs whose prefix is in _PULL_SKIP_PREFIXES BEFORE recursing.
-            # The frames/, depth/, world_points/ dirs each have ~500 entries —
-            # listing them blows past Modal's VolumeListFiles rate limit when
-            # we'd discard every file anyway in the per-file skip loop below.
-            rel = entry.path.lstrip("/")[len(scene_id) + 1:]
-            rel_with_slash = rel + "/" if is_dir and not rel.endswith("/") else rel
-            if any(
-                rel_with_slash == p or rel_with_slash.startswith(p)
-                for p in _PULL_SKIP_PREFIXES
-            ):
-                continue
-            if is_dir:
-                yield from _walk(entry.path)
-            else:
-                yield entry.path
-
     remote_root = f"/{scene_id}"
     try:
-        files = list(_walk(remote_root))
+        entries = list(vol.iterdir(remote_root, recursive=True))
     except FileNotFoundError:
         return
 
-    for remote_path in files:
-        rel = remote_path.lstrip("/")[len(scene_id) + 1:]  # strip "<id>/"
+    for entry in entries:
+        # FileEntryType.DIRECTORY == 2 in the Modal SDK; skip dir entries.
+        if getattr(entry, "type", None) and int(entry.type) == 2:
+            continue
+        rel = entry.path.lstrip("/")[len(scene_id) + 1:]  # strip "<id>/"
         if rel in skip:
             continue
         if any(rel == p or rel.startswith(p) for p in _PULL_SKIP_PREFIXES):
@@ -267,7 +254,7 @@ def _pull_outputs_from_modal(scene_id: str, exclude: set[str] | None = None) -> 
         local_path = dst_root / rel
         local_path.parent.mkdir(parents=True, exist_ok=True)
         with local_path.open("wb") as f:
-            for chunk in vol.read_file(remote_path):
+            for chunk in vol.read_file(entry.path):
                 f.write(chunk)
 
 

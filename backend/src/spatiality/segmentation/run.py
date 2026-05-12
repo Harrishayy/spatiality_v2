@@ -89,6 +89,11 @@ def _set_segmentation_status(
         artifacts["annotations_json"] = "annotations.c.json"
     else:
         artifacts.setdefault("annotations_json", "annotations.b.json")
+    # Stage 5: free-space / traversability grid (humanoid navigation layer).
+    if (scene_dir / "traversability.json").exists():
+        artifacts["traversability_json"] = "traversability.json"
+    if (scene_dir / "traversability.png").exists():
+        artifacts["traversability_png"] = "traversability.png"
 
     if status == "complete":
         m["status"] = "ready"
@@ -102,7 +107,7 @@ def _set_segmentation_status(
 
 
 def run(input_id: str, **kwargs) -> dict:
-    """Entry point called from ``modal_segmentation.py::run_segmentation_one``.
+    """Entry point called from ``backend/modal/segmentation.py::run_segmentation_one``.
 
     Accepted kwargs:
       lanes (list[str]): subset of {"b", "e", "f"} to run (default all).
@@ -243,6 +248,30 @@ def run(input_id: str, **kwargs) -> dict:
             lane_c_anns = run_lane_c(lane_b_anns, scene_dir, vlm_model=vlm_model)
             print(f"[stage:segmentation] Lane C done in {time.time()-t_c:.1f}s — "
                   f"{len(lane_c_anns)} annotations", flush=True)
+
+        # Stage 5 — free-space / traversability grid (humanoid navigation layer).
+        # Pure CPU on points.ply + cameras.json; the entire stage is decoupled
+        # from the VLM lanes so a failure here never invalidates the labels.
+        try:
+            from spatiality.nav.freespace import compute_freespace
+
+            t_nav = time.time()
+            print("[stage:segmentation] === Stage 5: free-space / traversability ===", flush=True)
+            nav_summary = compute_freespace(scene_dir)
+            print(
+                f"[stage:segmentation] traversability done in {time.time()-t_nav:.1f}s — "
+                f"{nav_summary['stats']['traversable_m2']:.2f} m² traversable, "
+                f"{nav_summary['stats']['obstacle_m2']:.2f} m² obstacles, "
+                f"grid {nav_summary['shape']} @ {nav_summary['cell_size_m']*100:.0f} cm",
+                flush=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Non-fatal — labels are the primary product; nav grid is a bonus.
+            print(
+                f"[stage:segmentation] traversability FAILED ({type(e).__name__}: {e}) — "
+                f"continuing without nav grid",
+                flush=True,
+            )
 
         duration = time.time() - t0
         _set_segmentation_status(

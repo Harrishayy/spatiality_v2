@@ -1,0 +1,95 @@
+# Local-GPU dependency set for the spatiality_v2 pipeline.
+#
+# ⚠️  EXPERIMENTAL / UNTESTED ⚠️
+#
+# This list is *inferred from* the two Modal image builds in
+#   backend/modal/inference.py     (Stage 1 — FlashVGGT geometry)
+#   backend/modal/segmentation.py  (Stages 2–5 — GDINO + lift + Lanes B/C + nav)
+# It was authored on macOS where the GPU stages cannot run, so the union
+# below has not been validated against a real CUDA wheel install. Treat any
+# install or runtime breakage as drift against the .pip_install(...) blocks
+# in those two files — those are the source of truth.
+#
+# Known tension between the two Modal images
+# ------------------------------------------
+# Stage 1 pins torch==2.4.0   (default PyPI index — wheels ship CUDA 12.1 runtime).
+# Stages 2–5 pin torch==2.5.1 (PyTorch's cu124 index).
+#
+# We resolve to torch 2.5.1+cu124 below because it's the stricter pin AND the
+# segmentation stack (sam-2, transformers/GDINO, DINOv2) is more torch-version-
+# sensitive than FlashVGGT's small custom modules. FlashVGGT *probably* runs
+# on torch 2.5.1, but we have not verified this. If FlashVGGT errors on import
+# or during the forward pass, the conservative fallback is to maintain TWO
+# separate venvs (one per Modal image's pin) and orchestrate them yourself.
+#
+# Install
+# -------
+# Use scripts/install_local_gpu.sh, which (a) `pip install -r` this file and
+# (b) applies the FlashVGGT pyproject patch from patches/ before installing
+# that repo. FlashVGGT cannot be installed by pip name alone — its upstream
+# pyproject is broken (see DESIGN_DECISIONS.md → FlashVGGT pyproject patch).
+
+# ─── PyTorch ──────────────────────────────────────────────────────────────────
+# cu124 wheels. If your driver only supports an older CUDA, swap to the
+# matching PyTorch wheel index (e.g. https://download.pytorch.org/whl/cu121).
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1
+torchvision==0.20.1
+
+# ─── numpy / imaging / classical CV ───────────────────────────────────────────
+# numpy<2 floor is forced by SAM 2.1 (still on the 1.x ABI).
+numpy>=1.26,<2
+Pillow
+opencv-python-headless
+scipy
+
+# ─── ML utilities ─────────────────────────────────────────────────────────────
+einops
+# scikit-learn powers the lift's GMM front-surface filter (GaussianMixture)
+# and 3D coherence filter (DBSCAN).
+scikit-learn>=1.4
+# tqdm + huggingface_hub everywhere; hf_transfer accelerates big weight pulls.
+huggingface_hub[hf_transfer]
+tqdm
+regex
+psutil
+pandas
+
+# ─── Detection / segmentation / re-ID ─────────────────────────────────────────
+# transformers >=4.50 ships AutoModelForZeroShotObjectDetection (Grounding DINO)
+# and DINOv2 image-encoder weights via AutoModel. <5 keeps us pre-major-bump.
+transformers>=4.50,<5
+# SAM 2.1-hiera-tiny for mask-grade pixel grounding inside the 3D lift.
+# Distribution name is "sam-2" (hyphen); importable module is "sam2".
+sam-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+
+# ─── FlashVGGT extra deps the upstream pyproject omits ────────────────────────
+# (audited from the FlashVGGT source tree — see DESIGN_DECISIONS.md)
+torch_kmeans
+kornia
+iopath
+fvcore
+wcmatch
+pycolmap
+# LightGlue is feature matching used by FlashVGGT's pose refiner; not on PyPI.
+lightglue @ git+https://github.com/cvg/LightGlue.git@main
+
+# ─── Base VGGT (fallback geometry model) ──────────────────────────────────────
+# Clean pyproject, installs straight from git. Used by inference/flashvggt.py
+# load_model() if FlashVGGT weights fail to load.
+vggt @ git+https://github.com/facebookresearch/vggt.git@main
+
+# ─── PydanticAI / Gemini ──────────────────────────────────────────────────────
+# Used by scout (slice → noun-phrases), Lane B (per-track labels), and Lane C
+# (whole-scene coherence). The [google] extra pulls Google's GenAI client.
+pydantic-ai-slim[google]>=0.0.40
+
+# ─── FastAPI orchestrator (only needed if you also run backend/main.py) ───────
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+
+# ─── FlashVGGT ITSELF is NOT in this file. ────────────────────────────────────
+# It needs the patched pyproject.toml applied at install time. See
+# scripts/install_local_gpu.sh for the three-step install (git clone → cp
+# patched pyproject → pip install).

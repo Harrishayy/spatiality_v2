@@ -31,16 +31,18 @@ interface UIState {
    *  the 3D scene. Toggled via the "Annotations" button in the toolbar. */
   showAnnotations: boolean;
   toggleAnnotations: () => void;
+  /** When true, the traversability grid overlay (Stage 5 — humanoid
+   *  free-space map) is shown as a translucent plane at floor height. */
+  showFreespace: boolean;
+  toggleFreespace: () => void;
   /** Active labeling lane — controls which annotations.*.json the viewer
    *  reads. "b" is the default VLM-verified labels lane. */
   lane: Lane;
-  setLane: (lane: Lane) => void;
   setSelected: (id: string | null) => void;
   toggleIsolated: (id: string) => void;
   clearIsolated: () => void;
   setCamera: (pos: Vec3, dir: Vec3) => void;
   setCloudStats: (stats: CloudStats | null) => void;
-  setRenderMode: (mode: RenderMode) => void;
   cycleRenderMode: () => void;
 }
 
@@ -54,8 +56,9 @@ export const useUI = create<UIState>((set) => ({
   renderMode: "rgb",
   showAnnotations: true,
   toggleAnnotations: () => set((s) => ({ showAnnotations: !s.showAnnotations })),
+  showFreespace: false,
+  toggleFreespace: () => set((s) => ({ showFreespace: !s.showFreespace })),
   lane: "b",
-  setLane: (lane) => set({ lane }),
   setSelected: (id) => set({ selectedId: id }),
   toggleIsolated: (id) =>
     set((s) => {
@@ -68,7 +71,6 @@ export const useUI = create<UIState>((set) => ({
   setCamera: (position, direction) =>
     set(() => ({ camera: { position, direction } })),
   setCloudStats: (cloudStats) => set({ cloudStats }),
-  setRenderMode: (renderMode) => set({ renderMode }),
   cycleRenderMode: () =>
     set((s) => ({
       renderMode:

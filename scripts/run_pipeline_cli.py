@@ -1,4 +1,4 @@
-"""CLI driver for the spatiality_v2 pipeline.
+"""CLI driver for the spatiality_v2 pipeline — Modal execution path.
 
 Usage:
     .venv/bin/python scripts/run_pipeline_cli.py <scene_id> [--frames 500]
@@ -7,6 +7,10 @@ Assumes ``backend/data/inputs/<scene_id>/source.<ext>`` already exists.
 Reuses the helpers in ``backend.main`` so the path matches the FastAPI
 orchestrator exactly (ffmpeg extract -> push -> inference -> pull poses ->
 segmentation -> pull all).
+
+If you don't have a Modal account and just want to run on your own CUDA
+GPU, use ``scripts/run_local_gpu.py`` instead (experimental — see its
+module docstring for caveats).
 """
 
 from __future__ import annotations

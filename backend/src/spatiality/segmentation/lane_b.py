@@ -37,7 +37,7 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from .lift import LiftedTrack
+from .lift import LiftedTrack, _absorb_evidence
 from .postprocess import cleanup_lane_b_annotations
 from .render import composite_grid, crop_anchor, render_track_orbit
 from .vlm import call_vlm_async
@@ -399,9 +399,18 @@ def _finalise(
         flush=True,
     )
 
-    out_path.write_text(json.dumps(cleaned, indent=2))
-
     out_dir = discarded_path.parent
+
+    # Relocate evidence/masks crops from merged-loser dirs into the survivor's
+    # dir so the viewer can resolve `obj_<survivor>/<frame>.{jpg,png}` for
+    # every frame_id listed on the merged annotation. Postprocess dedup only
+    # rewrites the JSON; without this step the loser's per-frame files stay
+    # under their original track_id and 404 in the UI.
+    for entry in cleaned:
+        for loser_id in entry.get("merged_from", []) or []:
+            _absorb_evidence(out_dir, entry["id"], loser_id)
+
+    out_path.write_text(json.dumps(cleaned, indent=2))
     upstream: list[dict] = []
     for fname in ("_gdino_discards.json", "_lift_discards.json"):
         fp = out_dir / fname

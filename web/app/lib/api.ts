@@ -1,14 +1,11 @@
 import type {
-  Annotation,
   ChatMessage,
   CostAggregate,
   DiscardedAnnotation,
-  GatewayHealth,
   JobSettings,
   Lane,
   LanePayload,
   Manifest,
-  TraceResponse,
 } from "./types";
 
 export function getArtifactUrl(sceneId: string, artifact: string): string {
@@ -103,14 +100,6 @@ export async function fetchDiscardedAnnotations(
   return Array.isArray(body) ? (body as DiscardedAnnotation[]) : [];
 }
 
-export async function fetchAnnotations(
-  sceneId: string,
-  lane?: Lane,
-): Promise<Annotation[]> {
-  const payload = await fetchLanePayload(sceneId, lane);
-  return payload.annotations;
-}
-
 export async function fetchPointsUrl(sceneId: string): Promise<string> {
   // The viewer parser is hard-coded for points.ply (xyz + uchar rgb +
   // optional confidence) — the dense colour point cloud produced by
@@ -155,25 +144,6 @@ export function maskUrl(
   return getArtifactUrl(sceneId, `masks/${annotationId}/${stem}.png`);
 }
 
-export async function postLocate(params: {
-  scene_id: string;
-  camera_pos: [number, number, number];
-  camera_dir: [number, number, number];
-  nearby: Array<{ id: string; label: string; centroid: [number, number, number] }>;
-}): Promise<{
-  text: string;
-  primary_object_id: string | null;
-  latency_ms: number;
-  model: string;
-}> {
-  const res = await fetch("/api/agent/locate", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(params),
-  });
-  return unwrap(res, "postLocate");
-}
-
 export async function postChat(params: {
   scene_id: string;
   message: string;
@@ -187,45 +157,9 @@ export async function postChat(params: {
   return unwrap(res, "postChat");
 }
 
-export async function fetchTrace(sceneId: string): Promise<TraceResponse> {
-  const res = await fetch(`/api/trace/${sceneId}`);
-  return unwrap(res, "fetchTrace");
-}
-
-/** Lightweight per-scene cost — same backend cache as `fetchTrace`, just
- *  the aggregated dollar / token / call totals. Drives the header
- *  CostBadge so it can refresh without pulling the full span tree. */
+/** Lightweight per-scene cost — aggregated dollar / token / call totals.
+ *  Drives the header CostBadge. */
 export async function fetchCost(sceneId: string): Promise<CostAggregate> {
   const res = await fetch(`/api/trace/${sceneId}/cost`);
   return unwrap(res, "fetchCost");
-}
-
-export interface SceneSummary {
-  scene_id: string;
-  status?: string;
-  created_at?: string;
-  stats?: {
-    frame_count?: number;
-    object_count?: number;
-    splat_size_mb?: number;
-  };
-  thumbnail?: string;
-  total_duration_s?: number;
-}
-
-export async function fetchScenes(): Promise<SceneSummary[]> {
-  const res = await fetch("/api/scenes", { cache: "no-store" });
-  if (!res.ok) throw new Error(`fetchScenes: ${res.status}`);
-  return res.json();
-}
-
-export async function fetchGatewayHealth(): Promise<GatewayHealth | null> {
-  try {
-    const res = await fetch("/api/gateway/health");
-    if (!res.ok) return null;
-    const health = (await res.json()) as GatewayHealth;
-    return health.ok ? health : null;
-  } catch {
-    return null;
-  }
 }

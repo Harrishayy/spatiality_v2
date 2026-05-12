@@ -146,7 +146,7 @@ def _update_manifest(scene_dir: Path, stage_entry: dict, top_status: str | None 
 
 
 def run(input_id: str, **kwargs) -> dict:
-    """Entry point called from ``modal_inference.py::run_inference_one``.
+    """Entry point called from ``backend/modal/inference.py::run_inference_one``.
 
     ``kwargs`` accepted:
       conf_min (float): drop pixels with VGGT depth_conf below this

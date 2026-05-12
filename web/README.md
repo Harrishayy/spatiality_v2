@@ -1,22 +1,18 @@
-# /web — Spatiality 3D mesh viewer
+# /web — Spatiality point cloud viewer
 
-Next.js 16 (App Router) + React 18 + TypeScript strict + Three.js + `@mkkellogg/gaussian-splats-3d` + Tailwind.
-
-Schema mirror lives at [`app/lib/types.ts`](./app/lib/types.ts) — keep in sync with `shared/shared/schemas/*.py`.
+Next.js 16 (App Router) + React 18 + TypeScript strict + Three.js + Tailwind.
 
 ## What ships out of the box
 
-- **SplatViewer** — drag/orbit/zoom, loads `splat.ply` via `gaussian-splats-3d`. When the splat is empty, falls back to a Three.js placeholder with annotation bboxes rendered as wireframes so the rest of the UI is exercisable. Dynamically imported with `ssr: false` since it owns a WebGL context.
-- **AnnotationOverlay** — HTML billboard pins anchored to each annotation centroid; tap to select, double-tap to isolate (Module 04 Path A).
-- **PipelineProgress** — auto-polls `manifest.json` every 2 s until `status === "ready"`, then loads splat + annotations.
-- **ChatPanel** — messages list + input. Talks to `/api/agent/chat`.
-- **WhereAmIButton** — frustum-filters annotations, POSTs to `/api/agent/locate`, shows the answer back in chat.
-- **Object isolation** — Tap pin or sidebar row to select; double-tap (or sidebar ◉) to toggle isolation. Hidden cluster annotations dim to 30% opacity. Once a real splat with `cluster_gaussian_indices` is wired, the same toggle hides those Gaussians too — that's the only edit needed in `SplatViewer.tsx`.
+- **PointCloudViewer** — drag/orbit/zoom Three.js viewer that streams `points.ply` (xyz + uchar rgb + optional confidence). Cycles between RGB / depth / confidence colorings. Dynamically imported with `ssr: false` since it owns a WebGL context.
+- **AnnotationOverlay** — HTML billboard pins anchored to each annotation centroid; tap to select, double-tap to isolate.
+- **PipelineProgress / PipelineOverview** — auto-poll `manifest.json` every 2 s until the splat stage completes, then render the cloud; segmentation continues in the background.
+- **SidePanel** — Pipeline / Objects / Evidence drawers, plus a chat input wired to `/api/agent/chat`.
+- **FreespaceCard** — toggles the Stage 5 traversability grid overlay at floor height.
 
 ## Routes
 
 - `/` — landing page.
-- `/demos` — gallery of available scenes.
 - `/upload` — upload a clip and start the pipeline.
 - `/scenes/[id]` — viewer for a given scene.
 
@@ -29,14 +25,14 @@ pnpm install
 pnpm dev      # → http://localhost:5173
 ```
 
-To point at a different agent host, set `NEXT_PUBLIC_AGENT_URL`:
+To point at a different agent host, set `SPATIALITY_API_URL`:
 
 ```
-NEXT_PUBLIC_AGENT_URL=http://localhost:9000 pnpm dev
+SPATIALITY_API_URL=http://localhost:9000 pnpm dev
 ```
 
 ## File contracts (read; don't drift)
 
 - `manifest.json` — schema in [`../shared/shared/schemas/manifest.py`](../shared/shared/schemas/manifest.py)
-- `annotations.json` — schema in [`../shared/shared/schemas/annotations.py`](../shared/shared/schemas/annotations.py); rendered as billboards
-- `splat.ply` — fetched URL passed to `gaussian-splats-3d`'s `addSplatScene`
+- `annotations.b.json` — Lane B (VLM-verified labels); schema in [`../shared/shared/schemas/annotations.py`](../shared/shared/schemas/annotations.py)
+- `points.ply` — dense colour point cloud from the poses stage; parsed by `PointCloudViewer`

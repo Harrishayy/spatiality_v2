@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/6e457084-cf2c-425e-bc4e-a94b9e32e3b3
     </tr>
   </table>
 
-### ▶ [Live demo · spatiality-v2.vercel.app](https://spatiality-v2.vercel.app)
+### ▶ [Live demo · spatiality-v2.vercel.app](https://spatiality-v2.vercel.app) (might have a long loading duration as 50,000,000 points need to be loaded on web 🥲)
 
 No SfM rig, no calibration, no manual labelling. Walk through a room with your phone; get back a point cloud you can orbit, a labelled inventory of every object, and a 2D top-down density map of what was captured.
 

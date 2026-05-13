@@ -15,6 +15,25 @@ const nextConfig = {
     optimizePackageImports: ["@tanstack/react-query"],
   },
 
+  async redirects() {
+    // The demo source video is ~115 MB. Vercel's rewrite-proxy clamps body
+    // responses to ~1 MiB, which truncates the video to ~2 s of playback.
+    // Bouncing the browser straight to R2 with a 307 lets the <video>
+    // element fetch the full file with proper Range support. Only active
+    // when NEXT_PUBLIC_DEMO_CDN_URL is set (i.e. the hosted demo build);
+    // local dev keeps the rewrite path so FastAPI serves source.mp4 from
+    // backend/data/inputs/<id>/.
+    const demoCdn = (process.env.NEXT_PUBLIC_DEMO_CDN_URL ?? "").replace(/\/$/, "");
+    if (!demoCdn) return [];
+    return [
+      {
+        source: "/artifacts/scenes/demo_piece/source.mp4",
+        destination: `${demoCdn}/source.mp4`,
+        permanent: false,
+      },
+    ];
+  },
+
   async rewrites() {
     // The local backend is `uvicorn backend.main:app --port 8765` from the
     // repo root. Override with SPATIALITY_API_URL only if you've actually

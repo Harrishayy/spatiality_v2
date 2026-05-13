@@ -71,18 +71,6 @@ export function CaptureMapCard({
     };
   }, [sceneId, jsonArtifact]);
 
-  if (!pngUrl) {
-    return (
-      <div className="pointer-events-auto absolute left-3 top-3 max-w-[280px] rounded-xl border border-ink-700/70 bg-ink-900/85 p-3 font-mono text-[11px] text-ink-200 backdrop-blur">
-        <div className="text-accent-300">Estimated capture map</div>
-        <div className="mt-1 text-ink-400">
-          Stage 4 hasn&rsquo;t run for this scene. Re-run the pipeline to
-          generate the capture map.
-        </div>
-      </div>
-    );
-  }
-
   const grid = meta?.grid_shape;
   // Prefer the tight (no-margin) extent for the displayed "extent" — it's
   // the actual captured footprint, not the grid's render-padded size.
@@ -90,6 +78,16 @@ export function CaptureMapCard({
     ?? (grid && meta ? grid[1] * meta.cell_size_m : null);
   const depthM = meta?.tight_extent_m?.[1]
     ?? (grid && meta ? grid[0] * meta.cell_size_m : null);
+
+  // The PNG is the truth signal for "Stage 4 has produced output". Until
+  // it lands, render the same card chrome with a populating skeleton so
+  // the viewer can see the map is being built rather than missing.
+  const populating = !pngUrl;
+  const segStatus = manifest.stages?.segmentation?.status;
+  const populatingLabel =
+    segStatus === "failed"
+      ? "stage 4 unavailable for this scene"
+      : "populating…";
 
   return (
     <div className="pointer-events-auto absolute left-3 top-3 w-[280px] rounded-xl border border-ink-700/70 bg-ink-900/85 p-3 font-mono text-[11px] text-ink-200 backdrop-blur">
@@ -101,30 +99,44 @@ export function CaptureMapCard({
       </div>
 
       <div className="mt-2 overflow-hidden rounded-md border border-ink-700/60 bg-ink-950">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={pngUrl}
-          alt="Top-down capture map: density of captured surfaces"
-          className="block w-full"
-          // Hint browser at expected aspect; backend upscales each cell 6×.
-          width={grid ? grid[1] * 6 : undefined}
-          height={grid ? grid[0] * 6 : undefined}
-        />
+        {populating ? (
+          <div
+            className="flex aspect-square w-full items-center justify-center bg-[radial-gradient(circle_at_center,rgba(255,157,111,0.08),rgba(17,9,14,0)_70%)]"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="animate-pulse text-[10px] uppercase tracking-[0.18em] text-ink-400">
+              {populatingLabel}
+            </span>
+          </div>
+        ) : (
+          /* eslint-disable-next-line @next/next/no-img-element */
+          <img
+            src={pngUrl!}
+            alt="Top-down capture map: density of captured surfaces"
+            className="block w-full"
+            // Hint browser at expected aspect; backend upscales each cell 6×.
+            width={grid ? grid[1] * 6 : undefined}
+            height={grid ? grid[0] * 6 : undefined}
+          />
+        )}
       </div>
 
       <ul className="mt-2 space-y-0.5 text-[10px] leading-snug text-ink-300">
         <li className="flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-sm bg-[#ffc484]" />
           <span className="text-ink-200">Observed surfaces</span>
-          {meta && (
+          {meta ? (
             <span className="ml-auto text-ink-400">
               ~{meta.stats.coverage_m2.toFixed(2)} m²
             </span>
+          ) : (
+            <span className="ml-auto text-ink-500">—</span>
           )}
         </li>
       </ul>
 
-      {meta && widthM && depthM && (
+      {meta && widthM && depthM ? (
         <div className="mt-2 grid grid-cols-2 gap-1 border-t border-ink-700/60 pt-2 text-[10px] text-ink-400">
           <div>
             <div className="text-ink-500">extent</div>
@@ -137,9 +149,22 @@ export function CaptureMapCard({
             <div className="text-ink-200">{meta.stats.n_frames}</div>
           </div>
         </div>
+      ) : (
+        populating && (
+          <div className="mt-2 grid grid-cols-2 gap-1 border-t border-ink-700/60 pt-2 text-[10px] text-ink-400">
+            <div>
+              <div className="text-ink-500">extent</div>
+              <div className="text-ink-600">—</div>
+            </div>
+            <div>
+              <div className="text-ink-500">frames</div>
+              <div className="text-ink-600">—</div>
+            </div>
+          </div>
+        )
       )}
 
-      {metaError && (
+      {metaError && !populating && (
         <div className="mt-2 text-[10px] text-accent-400">
           stats unavailable: {metaError}
         </div>

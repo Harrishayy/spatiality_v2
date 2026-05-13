@@ -24,6 +24,8 @@ A few principles that ended up driving most of these decisions:
 
 5. **Class-conditional priors beat scene-relative ones.** A "chair" with a 6 m diagonal is wrong regardless of how big the room is.
 
+6. **I am a student**, so I needed to optimise speed of inference to avoid incurring a Modal/GPU bill to a very unsympathetic bank balance. A lot of the "we kept the simpler/faster option" decisions above started life as "the slower one would have ended this project."
+
 &nbsp;
 
 ---
@@ -48,7 +50,7 @@ See `inference/flashvggt.py::load_model`.
 
 - **Better fine detail on long sequences.** Base VGGT's attention diffuses over many frames; FlashVGGT preserves per-frame texture better.
 
-- **Ships a `point_head` we can use.** `world_points` and `world_points_conf` come out of the same forward and let the lift skip its manual unprojection. This eliminates the convention-error class entirely (no more "did I forget to negate y?").
+- **Ships a `point_head` we can use.** `world_points` and `world_points_conf` come out of the same forward and let the lift skip its manual unprojection. This eliminates the convention-error class entirely.
 
 &nbsp;
 
@@ -86,6 +88,45 @@ def load_model(prefer="flashvggt"):
 ```
 
 If FlashVGGT's import or weight fetch fails for *any* reason (network blip, breaking change upstream, gated weight without HF token), the pipeline transparently falls back to base VGGT. The only visible difference is `meta["backend"] = "vggt"` in the `manifest.json`.
+
+&nbsp;
+
+---
+
+&nbsp;
+
+## 1.5. How each point in `points.ply` gets its xyz, rgb, and confidence
+
+`points.ply` is the user-facing geometric output. Each row is `(x, y, z, r, g, b, conf)`: float xyz in metres, uchar rgb, float depth-confidence. Where each channel comes from is the question §1 didn't answer.
+
+### Input geometry to VGGT
+
+Frames are preprocessed to a **518×518 square**, height resized to the nearest multiple of 14 (the patch grid) and center-cropped if the resize overshoots. See `inference/flashvggt.py:102–131::_load_and_preprocess_images`. The pose head's intrinsics come out in this 518-pixel coordinate frame; downstream code is careful to track the original vertical band the model actually saw so the world-points reproject correctly onto the source frame.
+
+### xyz source
+
+When the `point_head` is present (it is on FlashVGGT and base VGGT), each pixel's world-XYZ is taken directly from VGGT's `world_points[i, y, x]` tensor — no manual unprojection. This is the §1 shortcut from line 343: it eliminates the sign-convention error class entirely. If `point_head` is absent for any reason, the pipeline falls back to manual `depth × K⁻¹ × pixel` unprojection in the camera-to-world transform from `pose_enc`.
+
+### rgb source
+
+The colour for each kept pixel is sampled from the **original frame** (pre-518 resize) at the same `(y, x)` index, taken as uint8 from `image_rgb` on the per-frame result struct (`flashvggt.py:704`). This avoids the colour smear that would come from sampling the model's bilinearly-resized input.
+
+### Confidence channel
+
+The `conf` value written to PLY is **VGGT's `depth_conf` at that pixel** (`flashvggt.py:705`), not `world_points_conf`. `depth_conf` uses an `expp1` activation, so typical values are ≫ 1 on textured surfaces and drift toward 0 on sky/blur/dark. `world_points_conf` is computed and stored to disk for diagnostics but is not the channel surfaced in the final cloud.
+
+### Which raw pixels survive into the cloud
+
+A single 500-frame run at 1552×2064 is ~1.6 *billion* pre-filter pixels. The cascade in `flashvggt.py::extract_global_point_cloud` (lines 575–714) narrows that to a browser-loadable cloud through six gates, in order:
+
+1. **Bilateral depth smoothing** (`bilateral_d=5`) — edge-preserving smoothing of the depth map kills prediction noise on flat surfaces before any subsequent gate sees it.
+2. **Stride sampling** (`pixel_stride=2`) — every 2nd pixel in (y, x). Cuts pixel count 4× at the source.
+3. **Absolute confidence floor** (`conf_min=0.15`) — drop pixels where `depth_conf < 0.15`. The old `spatiality` repo used 0.20; v2 ships looser so textureless walls and floor survive.
+4. **Far-cap** (`depth_far_pct=95.0`, `depth_far_mult=1.5`) — drop pixels deeper than `1.5 × P95(depth)` per frame. Catches the enormous low-confidence depths VGGT predicts for sky and distant background that would otherwise project as huge floaters.
+5. **Depth-gradient silhouette guard** (`depth_grad_max=0.06`) — drop pixels where `|∇depth| / depth > 0.06`. These are object-silhouette edges where depth is unreliable; without this filter they project as floaters bridging foreground and background.
+6. **Global random subsample** (`target_count=50_000_000`) — caps total cloud size so the viewer's streaming PLY parser can handle it. Set `None` to disable.
+
+Items 1, 4, and 5 were ported from the v1 `spatiality` repo after v2's initial "no postprocessing" version produced visibly unusable clouds (sky floaters, silhouette webs). The funnel sizes at each stage are printed at run time so regressions are visible in the log.
 
 &nbsp;
 
@@ -159,7 +200,7 @@ The hard truth: **the web UI never rendered masks**, and the lift only consumes 
 
 - The image build was simpler: no SAM 2 / SAM 3.1 git+ install, no tricky CUDA flags.
 
-So we pulled `lane_e.py`, `lane_f.py`, and `sam3.py` (the deleted files in the working tree) and replaced the whole detection stage with: **GDINO once → IoU-link bboxes → lift bboxes**.
+So we pulled `sam3.py` entirely and replaced the whole detection stage with: **GDINO once → IoU-link bboxes → lift bboxes**.
 
 &nbsp;
 
@@ -208,12 +249,6 @@ See `segmentation/scene_scout.py`.
 
 &nbsp;
 
-### What we replaced
-
-A static 40-phrase indoor taxonomy ("chair", "desk", "monitor", …) that drove SAM 3.1's open-vocab head.
-
-&nbsp;
-
 ### Why discovery wins
 
 - **Coverage.** A static list misses the long tail (the Stitch plush toy, the green succulent in a terracotta pot, the gymnastics chalk bag). Scout enumerates whatever is actually in *this* scene.
@@ -226,11 +261,11 @@ A static 40-phrase indoor taxonomy ("chair", "desk", "monitor", …) that drove 
 
 ### Why a closed-class safety net on top
 
-Open-vocab discovery is non-deterministic. `person` may be missed in any given slice if the human walks through quickly.
+Open-vocab discovery is non-deterministic. A common indoor object (a ceiling light, a closet) can be silently absent from any given slice if Gemini happened to look at a frame where it's occluded or out of view.
 
-A 12-item safety net (`person`, `laptop`, `door`, `wardrobe`, `book`, `remote control`, `ceiling light`, …) gets unioned in with `frame_range=None` so these always propagate over the whole video. Each safety-net item adds one phrase to the multi-phrase GDINO query, which scales sub-linearly in the text encoder.
+A **5-phrase** safety net — `door`, `clothes rack`, `closet`, `laundry bag`, `ceiling light` (`segmentation/scene_scout.py::_GLOBAL_SAFETY_NET`) — gets unioned into the GDINO query with `frame_range=None` so these phrases always propagate over the whole video. Each item adds one phrase to the multi-phrase GDINO query, which scales sub-linearly in the text encoder, so wall-clock cost is negligible.
 
-The list is intentionally *short and conservative*. It doesn't include "wall" or "floor" because those are scene labels we explicitly ban in Lane B's prompt.
+The list is intentionally *short and conservative*. It doesn't include "wall" or "floor" because those are scene labels we explicitly ban in Lane B's prompt. It doesn't include high-recall scout categories (chair, table, sofa) because the scout already finds those reliably — the safety net is only for items the scout *empirically* missed in real captures.
 
 &nbsp;
 
@@ -360,25 +395,7 @@ Auth flows through the Pydantic AI Gateway in production (Modal `pydantic-gatewa
 
 ### Why Gemini Flash and not Anthropic / OpenAI
 
-This is a deliberate, recorded decision (memory: "VLM choice — Gemini via PydanticAI"). The reasoning:
-
-1. **Latency under fan-out.** Lane B fans out 16-way under `asyncio.gather`. Flash sustains that concurrency with sub-3-second per-call latency on a 9-image grid. We never hit a rate cap during normal runs.
-
-2. **Cost.** Flash is roughly an order of magnitude cheaper per call than Sonnet or GPT-4o for what is fundamentally a "look at a grid and pick a label" task. The pipeline runs ~25 to 60 calls per scene (1 scout fan-out × 20, 1 Lane C, 1 per labelled track) so cost matters.
-
-3. **Multi-image input.** Flash accepts arbitrary image lists in a single call without rendering them into one composite, which is convenient for the orbital plus anchor grid (we still pre-composite for prompt tidiness, but the path is open if we later want true multi-image).
-
-4. **Structured output via PydanticAI.** Flash supports JSON mode with a Pydantic schema, so the boundary between model and Python is sharp: no regex parsing of free-form text.
-
-5. **Gateway routing.** PydanticAI's gateway handles provider failover, retries, and observability for free. Switching to a different provider is one env var.
-
-&nbsp;
-
-### Why Flash and not Flash-Lite
-
-We tried Flash-Lite for Lane B and saw a measurable drop in the alternative-noun quality and reasoning coherence. The cost difference wasn't material at our call volume.
-
-Flash-Lite is exposed via `SPATIALITY_VLM_MODEL=gemini-2.5-flash-lite` for users who want it.
+This is a deliberate, recorded decision, because I wanted to save API costs. Given Gemini 2.5 Flash is cheap and good, I decided to use this. We could have used alternatives such as smolVLM and 
 
 &nbsp;
 
@@ -398,37 +415,7 @@ Flash-Lite is exposed via `SPATIALITY_VLM_MODEL=gemini-2.5-flash-lite` for users
 
 &nbsp;
 
-## 8. Lanes E and F: what we built and then deleted
-
-### Lane E: ConceptGraphs-style scene relations
-
-**What it was:** a third Gemini call per scene that ran SigLIP embeddings on each track's anchor crop, clustered them in feature space, and proposed `(subject, relation, object)` triples (`monitor on desk`, `chair under table`).
-
-**Why we deleted it (2026-05-10):** we weren't using its output. The web UI never rendered the relation graph; Lane B's per-track labels and Lane C's optional `scene_relations` field cover the actual user-facing story. Lane E was paying ~30 s of wallclock plus a SigLIP encode pass per scene for data nobody consumed.
-
-&nbsp;
-
-### Lane F: SpatialLM layout (walls, doors, windows)
-
-**What it was:** a separate model pass extracting room-layout primitives (wall planes, door rectangles, window rectangles) using SpatialLM-Llama-1B.
-
-**Why we deleted it (2026-05-10):** the weights are gated and the upstream Modal image build was fragile. The layout output also wasn't consumed by the UI.
-
-If room layout becomes a real product requirement, the cleanest revival path is Splatlands-style plane fitting on the existing point cloud rather than re-importing SpatialLM.
-
-&nbsp;
-
-### What's left in the code
-
-`segmentation/run.py:11-12` documents the deletion. The defaults in `run.py:121` are now `lanes = ["b", "c"]`. Lane E and F are gone from the dispatch table entirely.
-
-&nbsp;
-
----
-
-&nbsp;
-
-## 9. Postprocess: class-conditional priors vs scene-relative caps
+## 8. Postprocess: class-conditional priors vs scene-relative caps
 
 ### What we ship
 
@@ -476,7 +463,7 @@ This was the fix for "three chairs around a table fuse into one". They're all cl
 
 &nbsp;
 
-## 10. Lane C: the whole-scene coherence pass
+## 9. Lane C: the whole-scene coherence pass
 
 ### Why we have it at all
 
@@ -514,7 +501,7 @@ This matters because Lane C is the cheapest stage to re-run (~15 s) but it's als
 
 &nbsp;
 
-## 11. Confidence calibration: VLM × track length × depth confidence
+## 10. Confidence calibration: VLM × track length × depth confidence
 
 ### What we ship
 
@@ -526,18 +513,6 @@ calibrated_conf = clip(vlm_conf · corroboration, 0, 1)
 ```
 
 The VLM's confidence remains primary; we only down-weight when corroboration is weak.
-
-&nbsp;
-
-### Why this and not a learned calibrator (Platt / isotonic / temperature scaling)
-
-We have no held-out labelled data. Anything learned would be calibrated on an ad-hoc evaluation set that wouldn't generalise to the next user's bedroom.
-
-The hand-coded corroboration function is interpretable, the failure modes are obvious from inspection, and it covers the two signals that empirically correlate with "this label is right":
-
-- **Track length.** A 30+ frame track has cross-view evidence; a 5-frame track is one fast pan and a guess.
-
-- **Depth confidence.** VGGT's `depth_conf` is well-calibrated on textured surfaces. Low mean depth-conf means the lift was working with sky, blur, or glare and the centroid isn't trustworthy.
 
 &nbsp;
 
@@ -553,7 +528,7 @@ The hand-coded corroboration function is interpretable, the failure modes are ob
 
 &nbsp;
 
-## 12. Resumability: the per-unit checkpoint pattern
+## 11. Resumability: the per-unit checkpoint pattern
 
 ### What we ship
 
@@ -594,9 +569,7 @@ The cost is ~16 disk writes per second under full fan-out (negligible). The bene
 
 ### Why a `_v2` suffix on the lifted-tracks pickle
 
-Schema migration safety. The pre-2026 lifted-tracks dataclass carried a `siglip_feat` field (Lane E's appearance vector). Old pickles loaded into the new dataclass would silently set `siglip_feat=None` and the downstream code might or might not handle that gracefully.
-
-The `_v2` suffix makes it impossible to load a stale pickle into a new dataclass. We'd rather re-run the lift than mysteriously crash three steps later.
+Schema migration safety. The lifted-tracks dataclass has shed fields over the project's history. The `_v2` suffix makes it impossible to load an older pickle into the trimmed dataclass and have it silently set the missing fields to `None`. We'd rather re-run the lift than mysteriously crash three steps later.
 
 &nbsp;
 
@@ -604,14 +577,14 @@ The `_v2` suffix makes it impossible to load a stale pickle into a new dataclass
 
 &nbsp;
 
-## 13. Things considered and explicitly deferred
+## 12. Things considered and explicitly deferred
 
 For completeness, here's what we discussed and chose *not* to build:
 
 | Idea | Why deferred |
 |---|---|
-| **LangSplat / GS-Splat** for the splat representation | The web viewer uses three.js Points on the dense PLY directly. Real Gaussian-splat rasterisation would give nicer renders, but the engineering surface (training a 3DGS, headless EGL renderer, custom shader) is large for a quality bump that doesn't change the labelling story. Documented in `docs/future_work_langsplat.md`. |
-| **Re-running lift with SAM 3 masks** | Would tighten OBBs but only after re-introducing the SAM 3 install we just deleted. Marginal accuracy gain doesn't justify the ~10 min extra wallclock per scene. |
+| **LangSplat / GS-Splat** for the splat representation | The web viewer uses three.js Points on the dense PLY directly. Real Gaussian-splat rasterisation would give nicer renders, but the engineering surface (training a 3DGS, headless EGL renderer, custom shader) is large for a quality bump that doesn't change the labelling story. |
+| **Re-running lift with SAM 3 masks** | Would tighten OBBs but only after re-introducing the SAM 3 install we removed (see §3). Marginal accuracy gain doesn't justify the ~10 min extra wallclock per scene. |
 | **A per-scene class-prior learner** | Update the `_CLASS_OBB_RANGES_M` table from observed data over time. Premature without a database of labelled scenes; the static table is fine for now. |
 | **Anchor frame ordering in the prompt** | The grid currently feeds orbital views first, then anchors, in temporal order. Shuffling or score-ordering the anchors made no measurable difference in Lane B accuracy in our testing. |
 | **A real ANN search for tracklet linking** (Faiss) | The greedy O(N²)-per-frame linker is plenty fast at our detection counts. Faiss would matter at 100 k+ detections per scene, not 8 k. |
@@ -622,7 +595,7 @@ For completeness, here's what we discussed and chose *not* to build:
 
 &nbsp;
 
-## 14. What this all adds up to
+## 13. What this all adds up to
 
 The accuracy story compared to the v1 pipeline (the original `spatiality` repo):
 

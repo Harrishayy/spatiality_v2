@@ -6,12 +6,7 @@ No SfM rig, no calibration, no manual labelling. Walk through a room with your p
 
 Built as a submission for the [Humanoid](https://jobs.ashbyhq.com/humanoid) Perception & Spatial AI internship challenge.
 
-> _If you're a reviewer:_ start with the [What's novel](#whats-novel) section. The hosted demo link and a sample reconstruction GIF are at the top so you can see the system in 10 seconds without cloning anything.
-
-<!-- TODO(maintainer): drop a 6–10 s loop here once recorded. -->
-<!--
-![hero](docs/hero.gif)
--->
+> _If you're a reviewer:_ start with the [What's novel](#whats-novel) section, then jump to the hosted demo under [Try it](#try-it).
 
 &nbsp;
 
@@ -21,7 +16,6 @@ A humanoid platform doing real work in a building needs three things from its en
 
 - **Dense geometry** for footing, contact, and obstacle avoidance.
 - **Open-vocabulary semantics** so a high-level planner can be told "go to the kitchen counter" without retraining a fixed-taxonomy detector for every site.
-- **A spatial map of the capture** — a top-down footprint of what was observed, so a planner knows where surfaces sit and how much of the room was actually covered.
 
 spatiality_v2 produces all three from a single handheld phone capture. The same artefacts (point cloud, labelled tracks, capture map) are the building-block layer a navigation stack consumes — not a research demo of a single component.
 
@@ -29,8 +23,7 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
 
 ## Try it
 
-<!-- TODO(maintainer): replace this placeholder with the deployed URL. -->
-- **Hosted demo**: _(coming — paste Vercel URL here)_ — opens on
+- **Hosted demo** — opens on
   `/scenes/demo_piece`, no install, no Modal, no FastAPI. The full scene
   (1.3 GB `points.ply` plus all annotations, capture map, evidence
   crops, and masks) lives in a Cloudflare R2 bucket; the deployed site
@@ -39,11 +32,10 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
   [`web/next.config.mjs`](web/next.config.mjs). No demo data is committed
   to the repo. Same URL works locally with the same env var set:
   `cd web && NEXT_PUBLIC_DEMO_CDN_URL=https://<bucket>.r2.dev pnpm dev`.
-- **Download the full demo scene for offline use** (optional, ≈ 1.3 GB):
-  _(coming — paste GitHub Release link to `demo_piece_full.zip`)_.
-  Unzip into `backend/data/outputs/demo_piece/` and run the local FastAPI
-  orchestrator (`uvicorn backend.main:app --port 8765`) to view at full
-  quality without R2.
+- **Download the full demo scene for offline use** (optional, ≈ 1.3 GB)
+  via the GitHub Release. Unzip into `backend/data/outputs/demo_piece/`
+  and run the local FastAPI orchestrator (`uvicorn backend.main:app
+  --port 8765`) to view at full quality without R2.
 - **Run it yourself on your own scene**: see [Run it locally](#run-it-locally) below.
 - **What you get** — at the end of a run, in `backend/data/outputs/<scene_id>/`:
 
@@ -158,6 +150,14 @@ Then open `http://localhost:3000` and upload a 10–60 s phone video of a room.
 python scripts/run_pipeline_cli.py <scene_id>
 ```
 
+Or, as a one-command wrapper that runs the pipeline and tells you the viewer URL when it's done:
+
+```bash
+SCENE_ID=my_room bash scripts/run_scene.sh
+# or fetch a remote clip:
+SCENE_ID=my_room SAMPLE_URL=https://example.com/clip.mp4 bash scripts/run_scene.sh
+```
+
 Direct re-runs of either GPU stage (skipping ffmpeg):
 
 ```bash
@@ -247,11 +247,10 @@ backend/
     segmentation/          GDINO, re-ID, lift, lane_b, lane_c, postprocess
     nav/capture_map.py     Stage 4 — top-down density map of captured scene
 scripts/
+  run_scene.sh             One-command driver: video → pipeline → viewer (Modal)
   run_pipeline_cli.py      Headless end-to-end driver (Modal path)
   run_local_gpu.py         Local-CUDA end-to-end driver (no Modal — experimental)
   install_local_gpu.sh     Installer for the local-GPU dependency set
-  demo.sh                  One-command demo driver (Modal path)
-  build_demo_scene.py      Bake demo_piece into dist/ (R2 upload dir + offline zip)
 backend/
   requirements-local-gpu.txt  Pip set for the local-GPU path
 web/                       Next.js viewer (rewrites demo_piece URLs to R2)

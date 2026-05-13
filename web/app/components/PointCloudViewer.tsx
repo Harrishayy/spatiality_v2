@@ -1526,16 +1526,14 @@ export function PointCloudViewer({ pointsUrl, annotations, cameraCenters, emptyC
         onReset={() => apiRef.current?.reset()}
         onPreset={(view) => apiRef.current?.preset(view)}
       />
-      {miniPoints && (
-        <Minimap
-          points={miniPoints}
-          // Minimap reports clicks in PLY-frame z (matches the points it
-          // draws); setTarget expects renderer-frame z (negated). Flip here
-          // so click-to-pan moves the camera target to the spot the user
-          // actually pointed at, instead of mirroring across the Z axis.
-          onPan={(x, z) => apiRef.current?.setTarget([x, 0.1, -z])}
-        />
-      )}
+      <Minimap
+        points={miniPoints ?? undefined}
+        // Minimap reports clicks in PLY-frame z (matches the points it
+        // draws); setTarget expects renderer-frame z (negated). Flip here
+        // so click-to-pan moves the camera target to the spot the user
+        // actually pointed at, instead of mirroring across the Z axis.
+        onPan={(x, z) => apiRef.current?.setTarget([x, 0.1, -z])}
+      />
     </div>
   );
 }
@@ -1710,7 +1708,7 @@ function Minimap({
   points,
   onPan,
 }: {
-  points: {
+  points?: {
     xz: Float32Array;
     rgb: Float32Array;
     bounds: { minX: number; maxX: number; minZ: number; maxZ: number };
@@ -1722,7 +1720,16 @@ function Minimap({
   const SIZE = 180;
   const PAD = 12;
 
-  const { minX, maxX, minZ, maxZ } = points.bounds;
+  // Pre-points bounds: a unit box centred on origin. Keeps the
+  // world↔canvas helpers definable even while we're still streaming the
+  // PLY, so the camera marker overlay code paths don't have to special-
+  // case "no points yet". The chrome renders immediately, populated by
+  // the actual cloud once it streams in.
+  const populating = !points;
+  const minX = points?.bounds.minX ?? -0.5;
+  const maxX = points?.bounds.maxX ?? 0.5;
+  const minZ = points?.bounds.minZ ?? -0.5;
+  const maxZ = points?.bounds.maxZ ?? 0.5;
   const spanX = Math.max(1e-3, maxX - minX);
   const spanZ = Math.max(1e-3, maxZ - minZ);
   const scale = (SIZE - 2 * PAD) / Math.max(spanX, spanZ);
@@ -1739,7 +1746,9 @@ function Minimap({
     -(py - SIZE / 2) / scale + cz,
   ];
 
-  // Draw point cloud once (it's static after load).
+  // Draw point cloud once (it's static after load). When still populating,
+  // paint just the dark background so the chrome reads as "in-flight"
+  // rather than missing.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -1748,6 +1757,7 @@ function Minimap({
     ctx.clearRect(0, 0, SIZE, SIZE);
     ctx.fillStyle = "#0a0a0c";
     ctx.fillRect(0, 0, SIZE, SIZE);
+    if (!points) return;
     const xz = points.xz;
     const rgb = points.rgb;
     const m = xz.length / 2;
@@ -1782,29 +1792,49 @@ function Minimap({
           height={SIZE}
           className="rounded-lg border border-ink-700/70 bg-ink-950 shadow-lg"
           onClick={(e) => {
+            if (populating) return;
             const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
             const px = e.clientX - rect.left;
             const py = e.clientY - rect.top;
             const [wx, wz] = canvasToWorld(px, py);
             onPan(wx, wz);
           }}
-          title="Click to pan camera target there"
+          title={
+            populating
+              ? "Top-down view building from the point cloud…"
+              : "Click to pan camera target there"
+          }
+          style={{ cursor: populating ? "progress" : "pointer" }}
         />
-        {/* Camera marker */}
-        <svg
-          width={SIZE}
-          height={SIZE}
-          className="pointer-events-none absolute inset-0"
-        >
-          <g transform={`translate(${camPx}, ${camPy}) rotate(${dirAngleDeg})`}>
-            <polygon
-              points="0,-7 5,5 0,2 -5,5"
-              fill="#a78bfa"
-              stroke="#fff"
-              strokeWidth="1"
-            />
-          </g>
-        </svg>
+        {/* Camera marker — hidden while populating so we don't draw a stray
+            arrow over an empty box. */}
+        {!populating && (
+          <svg
+            width={SIZE}
+            height={SIZE}
+            className="pointer-events-none absolute inset-0"
+          >
+            <g transform={`translate(${camPx}, ${camPy}) rotate(${dirAngleDeg})`}>
+              <polygon
+                points="0,-7 5,5 0,2 -5,5"
+                fill="#a78bfa"
+                stroke="#fff"
+                strokeWidth="1"
+              />
+            </g>
+          </svg>
+        )}
+        {populating && (
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center"
+            role="status"
+            aria-live="polite"
+          >
+            <span className="animate-pulse rounded-md bg-ink-950/60 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-ink-400 backdrop-blur-sm">
+              populating…
+            </span>
+          </div>
+        )}
         <div className="absolute bottom-1 left-1 font-mono text-[9px] uppercase tracking-wider text-ink-500">
           world · top-down
         </div>

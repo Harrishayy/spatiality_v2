@@ -67,10 +67,10 @@ export default function ScenePage() {
   const failed = m?.status === "failed";
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-ink-950">
+    <div className="flex h-[100dvh] w-full max-w-[100vw] flex-col overflow-hidden bg-ink-950">
       <Header manifest={m} />
 
-      <main className="relative flex min-h-0 flex-1">
+      <main className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <section className="relative min-h-0 flex-1">
           {pointsReady && pointsUrl.data ? (
             <PointCloudViewer

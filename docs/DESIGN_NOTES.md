@@ -1,6 +1,6 @@
 # Design notes (short)
 
-The five decisions that materially shape the output. Each is one paragraph; the long-form rationale + every alternative I considered and rejected is in [`../DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md).
+The five decisions that materially shape the output. Each is one paragraph; the long-form rationale + every alternative I considered and rejected is in [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md).
 
 ### 1. FlashVGGT over COLMAP / DUSt3R / vanilla VGGT
 
@@ -18,7 +18,7 @@ Open-vocab detection with Grounding DINO is great in principle and terrible in p
 
 Two operational decisions that together kill the failure modes I actually saw. Per-track flush: Lane B writes its annotation immediately after each Gemini response — an earlier version wrote at end-of-loop and lost 24 labels to a single cancellation. Multi-view consistency in the lift: each pixel's world point is reprojected into other frames and only kept if it lands inside the SAM 2.1 mask in ≥ 50 % of views. Same idea as COLMAP-style visibility but applied to mask-grade segmentation — fixes the "floor bleed" mode where unmasked floor pixels otherwise get assigned to whichever object is closest.
 
-### 5. Gemini 2.5 Flash (via PydanticAI), not Anthropic / OpenAI
+### 5. Gemini 2.5 Flash (via PydanticAI)
 
 Lanes B and C are heavy on multi-image grids (3×3 anchor frames + orbital novel views per track). Gemini 2.5 Flash is roughly 5–10× cheaper than Claude Sonnet at our typical token mix, with structured-output reliability that's good enough via PydanticAI's `BaseModel` decoding. The pipeline can swap to Claude or to OpenAI by setting `SPATIALITY_VLM_MODEL` — `vlm.py` is the only file that knows the model id. The constraint on a portfolio piece is cost per scene; Flash makes a full run land at ~$0.05–$0.15 in Gemini fees instead of $0.50+.
 

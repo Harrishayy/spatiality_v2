@@ -37,6 +37,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 dist/
+scripts/maintainer/
 build/
 develop-eggs/
 sdist/

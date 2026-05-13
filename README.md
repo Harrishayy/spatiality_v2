@@ -2,6 +2,29 @@
 
 **Phone video → 3D scene + open-vocabulary semantic labels + top-down capture map.**
 
+
+https://github.com/user-attachments/assets/e0bd3b8d-ab3f-4f66-b8c8-e78208d06a0f
+
+
+
+https://github.com/user-attachments/assets/6e457084-cf2c-425e-bc4e-a94b9e32e3b3
+
+
+
+
+
+
+<table>
+    <tr>
+      <td align="center"><img width="1512" height="824" alt="Screenshot 2026-05-13 at 14 57 25" src="https://github.com/user-attachments/assets/ebe36034-d735-4397-a25e-80a6894c8a31" /><br><sub>Pipeline Timings</sub></td>
+      <td align="center"><img width="1512" height="824" alt="Screenshot 2026-05-13 at 14 57 29" src="https://github.com/user-attachments/assets/4f4fc99f-3825-4ada-9b78-d9f52195f4f1" /><br><sub>Object List</sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img width="1512" height="824" alt="Screenshot 2026-05-13 at 14 57 31" src="https://github.com/user-attachments/assets/58372fea-d95b-4bc8-a755-144eb98d46f7" /><br><sub>Evidence of Objects</sub></td>
+      <td align="center"><img width="1512" height="824" alt="Screenshot 2026-05-13 at 14 57 34" src="https://github.com/user-attachments/assets/a514c2d2-8759-455e-a635-08781e5b5a33" /><br><sub>Input Video</sub></td>
+    </tr>
+  </table>
+
 ### ▶ [Live demo · spatiality-v2.vercel.app](https://spatiality-v2.vercel.app)
 
 No SfM rig, no calibration, no manual labelling. Walk through a room with your phone; get back a point cloud you can orbit, a labelled inventory of every object, and a 2D top-down density map of what was captured.
@@ -305,6 +328,19 @@ The full rationale, with every alternative I considered and the failure mode tha
 
 #### Tradeoffs
 
+
+
+
+<table>
+    <tr>
+      <td align="center"><img width="1506" height="826" alt="Screenshot 2026-05-13 at 14 53 11" src="https://github.com/user-attachments/assets/79538f79-b4e3-4152-b973-284b99b8acd0" /><br><sub>Mistaken Headphone Case for Portable Speaker</sub></td>
+      <td align="center"><img width="1500" height="832" alt="Screenshot 2026-05-13 at 14 53 37" src="https://github.com/user-attachments/assets/b3cd1b50-b074-4499-a5c3-4d6db34bb9bf" /><br><sub>Mistaken Reflection for Recessed Light</sub></td>
+    </tr>
+    <tr>
+      <td align="center"><img width="1512" height="823" alt="Screenshot 2026-05-13 at 14 53 18" src="https://github.com/user-attachments/assets/99d215de-1d78-4e0f-903e-2597d204417b" /><br><sub>Mistaken Hard Drive Case for Portable Speaker
+</sub></td>
+    </tr>
+  </table>
 Every choice above buys something and costs something. The costs:
 
 - **The VLM mislabels confidently and often.** Gemini 2.5 Flash is given a 3×3 anchor grid plus orbital novel-view renders per track and asked to name what it sees. Real failures from the `demo_piece` run: a hard drive labelled "portable speaker", a headphone box also labelled "portable speaker", a glossy door reflection labelled "recessed light". Lane C catches some cross-scene inconsistencies (a stroller in a closed bedroom, two synonyms for the same chair) but not visually-plausible single-track wrongness. We down-weight VLM confidence by track length and mean depth-conf, but we don't penalise "confident and wrong" specifically because we have no calibration set to learn from. This is the single largest source of user-visible errors.

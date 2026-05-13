@@ -2,6 +2,7 @@
 
 **Phone video → 3D scene + open-vocabulary semantic labels + top-down capture map.**
 
+### ▶ [Live demo · spatiality-v2.vercel.app](https://spatiality-v2.vercel.app) (might have a long loading duration as 50,000,000 points need to be loaded on web 🥲)
 
 https://github.com/user-attachments/assets/e0bd3b8d-ab3f-4f66-b8c8-e78208d06a0f
 
@@ -24,8 +25,6 @@ https://github.com/user-attachments/assets/6e457084-cf2c-425e-bc4e-a94b9e32e3b3
       <td align="center"><img width="1512" height="824" alt="Screenshot 2026-05-13 at 14 57 34" src="https://github.com/user-attachments/assets/a514c2d2-8759-455e-a635-08781e5b5a33" /><br><sub>Input Video</sub></td>
     </tr>
   </table>
-
-### ▶ [Live demo · spatiality-v2.vercel.app](https://spatiality-v2.vercel.app) (might have a long loading duration as 50,000,000 points need to be loaded on web 🥲)
 
 No SfM rig, no calibration, no manual labelling. Walk through a room with your phone; get back a point cloud you can orbit, a labelled inventory of every object, and a 2D top-down density map of what was captured.
 

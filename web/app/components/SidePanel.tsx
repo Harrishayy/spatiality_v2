@@ -14,7 +14,7 @@ import { useUI } from "@/store/ui";
 import { AnnotationEvidencePanel } from "./AnnotationEvidencePanel";
 import { PipelineProgress } from "./PipelineProgress";
 
-export type SceneSection = "pipeline" | "objects" | "evidence";
+export type SceneSection = "pipeline" | "objects" | "evidence" | "inputs";
 
 interface ColumnProps {
   manifest: Manifest;
@@ -68,6 +68,12 @@ export function SceneSideColumn({
           disabled={!selected}
           onClick={() => onToggleSection("evidence")}
         />
+        <RailButton
+          label="Inputs"
+          icon="▶"
+          active={openSection === "inputs"}
+          onClick={() => onToggleSection("inputs")}
+        />
       </div>
     </aside>
   );
@@ -114,7 +120,9 @@ export function SceneDrawerOverlay({
         ? { name: "Objects", accent: "scene" }
         : openSection === "evidence"
           ? { name: "Evidence", accent: selected?.label ?? "" }
-          : null;
+          : openSection === "inputs"
+            ? { name: "Input", accent: "source video" }
+            : null;
 
   let body: ReactNode = null;
   if (openSection === "pipeline") {
@@ -151,6 +159,8 @@ export function SceneDrawerOverlay({
         its evidence frames here.
       </p>
     );
+  } else if (openSection === "inputs") {
+    body = <InputVideoPanel sceneId={sceneId} />;
   }
 
   return (
@@ -177,6 +187,32 @@ export function SceneDrawerOverlay({
       </div>
       <div className="lp-drawer-body">{body}</div>
     </div>
+  );
+}
+
+function InputVideoPanel({ sceneId }: { sceneId: string }) {
+  const src = `/artifacts/scenes/${encodeURIComponent(sceneId)}/source.mp4`;
+  return (
+    <>
+      <p className="lp-modal-hint">
+        The input video used to make this spatial scene. Walk-through clip
+        captured handheld on a phone; every artefact in this viewer
+        (point cloud, object inventory, capture map) was derived from these
+        frames.
+      </p>
+      <video
+        controls
+        playsInline
+        preload="metadata"
+        src={src}
+        style={{
+          width: "100%",
+          maxHeight: "70vh",
+          borderRadius: 8,
+          background: "#000",
+        }}
+      />
+    </>
   );
 }
 

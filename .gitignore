@@ -138,6 +138,8 @@ frames/
 !examples/**/*.mov
 !docs/**/*.mp4
 !docs/**/*.mov
+docs/demo.mov
+docs/demo.mp4
 
 # Reconstruction outputs
 reconstructions/

@@ -8,7 +8,7 @@ No SfM rig, no calibration, no manual labelling. Walk through a room with your p
 
 Built as a submission for the [Humanoid](https://jobs.ashbyhq.com/humanoid) Perception & Spatial AI internship challenge.
 
-> _If you're a reviewer:_ click the live demo above to see the system end-to-end in one click; then read [Architecture](#architecture) and [What's novel](#whats-novel) for the design decisions. For information on the design choices + tradeoff, read [Design Choices](#design-choices)
+> _If you're a reviewer:_ click the live demo above to see the system end-to-end in one click; then read [Architecture](#architecture) and [What's novel](#whats-novel) for the design decisions. For information on the design choices + tradeoffs, read [Design choices](#design-choices).
 
 &nbsp;
 
@@ -34,11 +34,18 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
   [`web/next.config.mjs`](web/next.config.mjs). No demo data is committed
   to the repo. Same URL works locally with the same env var set:
   `cd web && NEXT_PUBLIC_DEMO_CDN_URL=https://<bucket>.r2.dev pnpm dev`.
-- **Download the full demo scene for offline use** (optional, ≈ 1.3 GB).
-  Pulls the same scene the hosted demo serves, but locally and at full
-  PLY quality. **No Modal account, no GPU, no API keys, no ffmpeg
-  needed**: you're only viewing a pre-baked scene, not running the
-  pipeline.
+- **Download the full demo scene for offline use** (optional, ≈ 1.3 GB
+  outputs; add ≈ 1.5 GB if you also want the original phone video and
+  the 900 extracted frames). Pulls the same scene the hosted demo
+  serves, but locally and at full PLY quality. **No Modal account, no
+  GPU, no API keys, no ffmpeg needed**: you're only viewing a pre-baked
+  scene, not running the pipeline.
+
+  Everything is published as assets on the
+  [`demo-piece-v1` GitHub Release](https://github.com/Harrishayy/spatiality_v2/releases/tag/demo-piece-v1):
+
+  - [`demo_piece_outputs.zip`](https://github.com/Harrishayy/spatiality_v2/releases/download/demo-piece-v1/demo_piece_outputs.zip) (≈ 1.3 GB) — `points.ply`, all annotation files, `cameras.json`, `tracks.json`, `capture_map.{json,png}`, `evidence/`, `masks/`, `manifest.json`. **This is the only file you need to view the demo locally.**
+  - [`demo_piece_inputs.zip`](https://github.com/Harrishayy/spatiality_v2/releases/download/demo-piece-v1/demo_piece_inputs.zip) (≈ 1.5 GB) — original `source.mp4` capture and the 900 frames the pipeline ingested. Optional; only needed if you want to inspect the raw input or re-run the pipeline.
 
   Prereqs: Python 3.12, [pnpm](https://pnpm.io/installation), and ~3 GB
   free disk. Then:
@@ -48,13 +55,20 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
   git clone https://github.com/Harrishayy/spatiality_v2.git
   cd spatiality_v2
 
-  # 2. Grab the demo zip from the latest GitHub Release and drop the
+  # 2. Grab the demo outputs zip from the GitHub Release and drop the
   #    scene under backend/data/outputs/. The zip's top-level folder is
   #    already named demo_piece/, so it lands at the right path.
   mkdir -p backend/data/outputs
-  curl -L -o /tmp/demo_piece_full.zip \
-    https://github.com/Harrishayy/spatiality_v2/releases/latest/download/demo_piece_full.zip
-  unzip /tmp/demo_piece_full.zip -d backend/data/outputs/
+  curl -L -o /tmp/demo_piece_outputs.zip \
+    https://github.com/Harrishayy/spatiality_v2/releases/download/demo-piece-v1/demo_piece_outputs.zip
+  unzip /tmp/demo_piece_outputs.zip -d backend/data/outputs/
+
+  # 2b. (optional) Also grab the original video + frames into
+  #     backend/data/inputs/.
+  # mkdir -p backend/data/inputs
+  # curl -L -o /tmp/demo_piece_inputs.zip \
+  #   https://github.com/Harrishayy/spatiality_v2/releases/download/demo-piece-v1/demo_piece_inputs.zip
+  # unzip /tmp/demo_piece_inputs.zip -d backend/data/inputs/
 
   # 3. Install the laptop-side backend deps (FastAPI + uvicorn +
   #    multipart, declared in backend/pyproject.toml; no torch, no
@@ -76,7 +90,7 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
   cd web && pnpm dev
   ```
 
-  Then open `http://localhost:3000/scenes/demo_piece`. The viewer
+  Then open `http://localhost:5173/scenes/demo_piece`. The viewer
   streams the 1.3 GB `points.ply` straight from disk, so it's faster
   and higher-fidelity than the R2-routed hosted demo.
 - **Run it yourself on your own scene**: see [Run it locally](#run-it-locally) below.
@@ -194,7 +208,7 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload
 cd web && pnpm install && pnpm dev
 ```
 
-Then open `http://localhost:3000` and upload a 10–60 s phone video of a room.
+Then open `http://localhost:5173` and upload a 10–60 s phone video of a room.
 
 #### Or run headless (no UI)
 
@@ -231,7 +245,7 @@ Use this if you have your own CUDA-capable GPU (A100-class or similar, ≥ 24 GB
 bash scripts/install_local_gpu.sh
 ```
 
-This installs everything from [`backend/requirements-local-gpu.txt`](backend/requirements-local-gpu.txt), then clones FlashVGGT and applies our [`patches/`](patches/) fix before installing it (upstream's `pyproject.toml` is broken, see [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md)).
+This installs everything from [`backend/requirements-local-gpu.txt`](backend/requirements-local-gpu.txt), then clones FlashVGGT and applies our [`patches/`](patches/) fix before installing it (upstream's `pyproject.toml` is broken, see [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md)).
 
 Known unknown: FlashVGGT was built against torch 2.4; the combined env uses torch 2.5.1 (the segmentation stack's pin). If FlashVGGT errors on torch 2.5.1, the fallback is to maintain two separate venvs (one per Modal image's pin), the requirements file's header notes this.
 
@@ -254,7 +268,7 @@ Then point the web UI at the same `backend/data/outputs/<scene_id>/` the script 
 ```bash
 uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload
 cd web && pnpm dev
-# http://localhost:3000/scenes/<scene_id>
+# http://localhost:5173/scenes/<scene_id>
 ```
 
 The web UI does not need Modal, it just serves files from `backend/data/outputs/`. Once the local run finishes, the scene viewer behaves identically to the Modal path.

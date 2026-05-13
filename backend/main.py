@@ -100,6 +100,26 @@ def _evidence_frame_fallback(scene_id: str, rel_path: str) -> Path | None:
     return None
 
 
+def _source_video_fallback(scene_id: str, rel_path: str) -> Path | None:
+    # The Inputs drawer fetches `/artifacts/scenes/<id>/source.mp4`, but the
+    # uploaded video lives under `inputs/<id>/source.<ext>` (not outputs/).
+    # Map any `source.<ext>` request that isn't on disk in outputs back to
+    # the inputs dir, preferring an mp4 if present (cross-browser friendly).
+    if Path(rel_path).stem != "source":
+        return None
+    input_dir = _scene_input_dir(scene_id)
+    if not input_dir.exists():
+        return None
+    requested = input_dir / rel_path
+    if requested.is_file():
+        return requested
+    for ext in (".mp4", ".mov", ".webm", ".mkv", ".m4v"):
+        cand = input_dir / f"source{ext}"
+        if cand.is_file():
+            return cand
+    return None
+
+
 def _ffprobe_duration_seconds(video: Path) -> float:
     out = subprocess.check_output(
         [
@@ -640,7 +660,10 @@ def get_artifact(scene_id: str, rel_path: str):
         # Pre-evidence-crop scenes (e.g. demo_piece) only kept full source
         # frames under frames/<stem>.png. Fall back so the evidence panel
         # still has something to render for the demo scene.
-        fallback = _evidence_frame_fallback(scene_id, rel_path)
+        fallback = (
+            _source_video_fallback(scene_id, rel_path)
+            or _evidence_frame_fallback(scene_id, rel_path)
+        )
         if fallback is not None:
             target = fallback
         else:

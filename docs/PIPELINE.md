@@ -53,7 +53,7 @@ phone video (.mp4 / .mov)
                    3D viewer in the web UI
 ```
 
-The whole run takes roughly **8–14 minutes** for a 500-frame indoor capture.
+The whole run takes roughly **14–19 minutes** for a 500-frame indoor capture.
 
 Each stage produces files on disk, every stage is resumable from its checkpoint, and any failure flips `manifest.json` so the frontend stops polling.
 
@@ -170,7 +170,7 @@ FlashVGGT's compressed-descriptor attention scales to 1 k+ frames in a single fo
 
 To keep the user informed during this otherwise-opaque ~4-minute call, we attach per-submodule forward hooks that print as each top-level block fires (`aggregator`, `depth_head`, `camera_head`, `point_head`, …) and run a watchdog thread that prints elapsed wallclock + GPU memory every 10 s.
 
-A **forward checkpoint** (`_forward_preds.pt`) is dropped to disk *immediately* after the GPU work, so any downstream crash (pose decode, K rescale, file I/O) doesn't throw away ~4 min of A100 time. It's deleted once the final artefacts land.
+A **forward checkpoint** (`_forward_preds.pt`) is dropped to disk *immediately* after the GPU work, so any downstream crash (pose decode, K rescale, file I/O) doesn't throw away ~5–6 min of A100 time. It's deleted once the final artefacts land.
 
 &nbsp;
 
@@ -555,29 +555,29 @@ The stage is **idempotent**: if `annotations.c.json` already exists, it's return
 
 ## 5. Stage 4: Capture map (Modal CPU)
 
-Stage 4 emits a top-down 2D map of the captured space — a density heatmap of above-floor surfaces showing what was observed and how much of the room was covered. It runs at the end of segmentation on CPU (numpy + Pillow), uses no models, and is non-fatal — if it raises, Lanes B/C labels still ship as the primary product.
+Stage 4 emits a top-down 2D map of the captured space, a density heatmap of above-floor surfaces showing what was observed and how much of the room was covered. It runs at the end of segmentation on CPU (numpy + Pillow), uses no models, and is non-fatal, if it raises, Lanes B/C labels still ship as the primary product.
 
-This used to be a humanoid free-space / traversability layer. We dropped that framing because handheld captures rarely contain enough floor pixels to support "where can a robot stand?" — the previous algorithm was returning 0 m² traversable on every desk-centric scene. The capture map is the artefact every run can produce meaningfully.
+This used to be a humanoid free-space / traversability layer. We dropped that framing because handheld captures rarely contain enough floor pixels to support "where can a robot stand?", the previous algorithm was returning 0 m² traversable on every desk-centric scene. The capture map is the artefact every run can produce meaningfully.
 
 **Inputs:** `points.ply`, `cameras.json`.
 
 **What it does** (`backend/src/spatiality/nav/capture_map.py`):
 
-1. **Recover scene up.** Each camera's image-y axis (`[0, -1, 0]` in camera space) is mapped through `Rᵀ` into world coordinates. Averaging across all cameras gives a stable gravity estimate — more robust than either "−y in world" (only true if frame 0 is level) or PCA of the cloud (gets confused by tall obstacles).
+1. **Recover scene up.** Each camera's image-y axis (`[0, -1, 0]` in camera space) is mapped through `Rᵀ` into world coordinates. Averaging across all cameras gives a stable gravity estimate, more robust than either "−y in world" (only true if frame 0 is level) or PCA of the cloud (gets confused by tall obstacles).
 2. **Pick an in-plane basis.** Two orthonormal axes `(u, v)` perpendicular to `up` so the grid's rows/cols are aligned with the captured space's natural orientation.
 3. **Estimate the floor.** Project every point onto `up`, then take the densest 5 cm band near the 2nd-percentile height. Single-point outliers under the floor don't move the estimate.
-4. **Drop the floor itself.** Points within 5 cm of the floor are removed — they're either the floor (uninteresting for "what's in the room") or under-floor noise. What remains is everything *standing on* the floor.
+4. **Drop the floor itself.** Points within 5 cm of the floor are removed, they're either the floor (uninteresting for "what's in the room") or under-floor noise. What remains is everything *standing on* the floor.
 5. **Rasterise above-floor density.** XY footprint at 5 cm cells. Per cell, count above-floor points; log-bin to uint8 because the raw count distribution is heavy-tailed (a high-coverage shelf can have 100× the points of a typical cell) and a linear ramp washes everything else into the background.
 6. **Tighten the grid** via a 5th-percentile density threshold + 3-cell breathing-room margin. The percentile filter drops long-tail single-point cells at the periphery that would otherwise drag the displayed extent out by 30-40%.
 
 **Outputs:**
 
-- `capture_map.json` — `{cell_size_m, grid_shape, tight_extent_m, origin_uv_m, floor_height_world, up_axis_world, u_axis_world, v_axis_world, camera_center_uv_m, stats: {coverage_m2, coverage_cells, n_frames}, density_b64: base64(uint8 grid)}`. The basis vectors are preserved verbatim from the previous schema so the viewer's leveling code keeps working — gravity-aligned cloud, floor at Y=0.
-- `capture_map.png` — top-down preview: amber density heatmap (sparse → bright as cells get denser). This is what the viewer's "Capture map" toggle surfaces.
+- `capture_map.json`: `{cell_size_m, grid_shape, tight_extent_m, origin_uv_m, floor_height_world, up_axis_world, u_axis_world, v_axis_world, camera_center_uv_m, stats: {coverage_m2, coverage_cells, n_frames}, density_b64: base64(uint8 grid)}`. The basis vectors are preserved verbatim from the previous schema so the viewer's leveling code keeps working (gravity-aligned cloud, floor at Y=0).
+- `capture_map.png`: top-down preview, amber density heatmap (sparse → bright as cells get denser). This is what the viewer's "Capture map" toggle surfaces.
 
 **Why CPU and why now**: the points + camera poses already encode all the geometry; the only computer-visiony step (floor extraction) is robust statistics. Wall-clock is ~5–15 s on a 50 M-point cloud; cost is zero (no API calls). Wired into `segmentation.run` after Lane C so it never blocks labels' completion.
 
-The frontend reads `manifest.artifacts.capture_map_png` / `capture_map_json`; absence means the stage didn't run (e.g. older scenes) and the viewer falls back to "Stage 4 hasn't run" copy in the Capture-map card.
+The frontend reads `manifest.artifacts.capture_map_png` / `capture_map_json`. When the user toggles the Capture-map card open, the card chrome renders immediately with a pulsing "populating…" skeleton; once the artefact lands it swaps in the actual image plus stats. If `segmentation.status === "failed"` the populating label changes to "stage 4 unavailable for this scene".
 
 &nbsp;
 
@@ -670,7 +670,7 @@ Anything starting with `_` is a checkpoint that gets cleaned up on a successful 
 
 | Stage | Checkpoint | What resume skips |
 |---|---|---|
-| Poses | `_forward_preds.pt` | the whole forward pass (~4 min A100) |
+| Poses | `_forward_preds.pt` | the whole forward pass (~5–6 min A100) |
 | Scene scout | `scout_prompts.json` | 20 Gemini calls (~15 s) |
 | GDINO | `tracks.json` | the multi-phrase sweep (~30 s) |
 | Lift | `_lifted_tracks_v2.pkl` | every per-track lift + multi-view filter |
@@ -705,7 +705,7 @@ The frontend's poll sees `status: "failed"`, stops spinning, and shows the error
 
 Two execution paths. Path A is the supported one; Path B exists so anyone with their own CUDA box can skip Modal.
 
-### Path A — Modal (the path the rest of this doc describes)
+### Path A: Modal (the path the rest of this doc describes)
 
 The laptop runs the local services:
 
@@ -735,9 +735,9 @@ modal run backend/modal/segmentation.py::main --input-id <scene_id> [--lanes b,c
 
 Both `--local_entrypoint`s pull the outputs back into a fresh `backend/data/outputs/<scene_id>_<timestamp>/` so prior runs are never overwritten.
 
-### Path B — Local CUDA GPU (no Modal) — ⚠️ experimental, untested
+### Path B: Local CUDA GPU (no Modal) ⚠️ experimental, untested
 
-For someone with their own GPU who doesn't want a Modal account. **This path was authored on macOS and has not been smoke-tested on real CUDA hardware** — every dependency and env-var choice is inferred from the working Modal image builds in [`../backend/modal/`](../backend/modal/). If anything errors, treat those two files as the source of truth.
+For someone with their own GPU who doesn't want a Modal account. **This path was authored on macOS and has not been smoke-tested on real CUDA hardware**, every dependency and env-var choice is inferred from the working Modal image builds in [`../backend/modal/`](../backend/modal/). If anything errors, treat those two files as the source of truth.
 
 ```bash
 # one-time install (FlashVGGT applies the patched pyproject from patches/)
@@ -746,12 +746,12 @@ bash scripts/install_local_gpu.sh
 # put your video at backend/data/inputs/<scene_id>/source.mp4
 python scripts/run_local_gpu.py <scene_id>
 
-# (optional) view in the web UI — the FastAPI server just serves files
+# (optional) view in the web UI, the FastAPI server just serves files
 uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload
 cd web && pnpm dev  # http://localhost:3000/scenes/<scene_id>
 ```
 
-The local-GPU runner sets `SPATIALITY_DATA_ROOT=backend/data/inputs` and `SPATIALITY_ARTEFACTS_ROOT=backend/data/outputs`, then calls `spatiality.inference.run` and `spatiality.segmentation.run` in-process — the same entry points Modal's `run_inference_one` / `run_segmentation_one` wrappers delegate to. The web viewer is identical either way: it just reads `backend/data/outputs/<scene_id>/`.
+The local-GPU runner sets `SPATIALITY_DATA_ROOT=backend/data/inputs` and `SPATIALITY_ARTEFACTS_ROOT=backend/data/outputs`, then calls `spatiality.inference.run` and `spatiality.segmentation.run` in-process, the same entry points Modal's `run_inference_one` / `run_segmentation_one` wrappers delegate to. The web viewer is identical either way: it just reads `backend/data/outputs/<scene_id>/`.
 
 &nbsp;
 
@@ -771,4 +771,4 @@ The local-GPU runner sets `SPATIALITY_DATA_ROOT=backend/data/inputs` and `SPATIA
 | Labelling | **Gemini 2.5 Flash** | per-call API | structured `{label, alternatives, confidence, reasoning}` from 9-image grid |
 | Coherence | **Gemini 2.5 Flash** | per-call API | one whole-scene call; relabels / drops / merges / relations |
 
-For *why* each of these was chosen over the alternatives we tried (SAM 3.1, SAM 2 video propagation, Anthropic VLMs, SpatialLM, ConceptGraphs Lane E, …), see [`DESIGN_DECISIONS.md`](./DESIGN_DECISIONS.md).
+For *why* each of these was chosen over the alternatives we tried (SAM 3.1, SAM 2 video propagation, Anthropic VLMs, …), see [`docs/DESIGN_DECISIONS.md`](./docs/DESIGN_DECISIONS.md).

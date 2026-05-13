@@ -1,4 +1,4 @@
-# spatiality_v2 — Design decisions, rejects, and tradeoffs
+# spatiality_v2: Design decisions, rejects, and tradeoffs
 
 Companion to [`PIPELINE.md`](./PIPELINE.md).
 
@@ -105,7 +105,7 @@ Frames are preprocessed to a **518×518 square**, height resized to the nearest 
 
 ### xyz source
 
-When the `point_head` is present (it is on FlashVGGT and base VGGT), each pixel's world-XYZ is taken directly from VGGT's `world_points[i, y, x]` tensor — no manual unprojection. This is the §1 shortcut from line 343: it eliminates the sign-convention error class entirely. If `point_head` is absent for any reason, the pipeline falls back to manual `depth × K⁻¹ × pixel` unprojection in the camera-to-world transform from `pose_enc`.
+When the `point_head` is present (it is on FlashVGGT and base VGGT), each pixel's world-XYZ is taken directly from VGGT's `world_points[i, y, x]` tensor, no manual unprojection. This is the §1 shortcut from line 343: it eliminates the sign-convention error class entirely. If `point_head` is absent for any reason, the pipeline falls back to manual `depth × K⁻¹ × pixel` unprojection in the camera-to-world transform from `pose_enc`.
 
 ### rgb source
 
@@ -119,12 +119,12 @@ The `conf` value written to PLY is **VGGT's `depth_conf` at that pixel** (`flash
 
 A single 500-frame run at 1552×2064 is ~1.6 *billion* pre-filter pixels. The cascade in `flashvggt.py::extract_global_point_cloud` (lines 575–714) narrows that to a browser-loadable cloud through six gates, in order:
 
-1. **Bilateral depth smoothing** (`bilateral_d=5`) — edge-preserving smoothing of the depth map kills prediction noise on flat surfaces before any subsequent gate sees it.
-2. **Stride sampling** (`pixel_stride=2`) — every 2nd pixel in (y, x). Cuts pixel count 4× at the source.
-3. **Absolute confidence floor** (`conf_min=0.15`) — drop pixels where `depth_conf < 0.15`. The old `spatiality` repo used 0.20; v2 ships looser so textureless walls and floor survive.
-4. **Far-cap** (`depth_far_pct=95.0`, `depth_far_mult=1.5`) — drop pixels deeper than `1.5 × P95(depth)` per frame. Catches the enormous low-confidence depths VGGT predicts for sky and distant background that would otherwise project as huge floaters.
-5. **Depth-gradient silhouette guard** (`depth_grad_max=0.06`) — drop pixels where `|∇depth| / depth > 0.06`. These are object-silhouette edges where depth is unreliable; without this filter they project as floaters bridging foreground and background.
-6. **Global random subsample** (`target_count=50_000_000`) — caps total cloud size so the viewer's streaming PLY parser can handle it. Set `None` to disable.
+1. **Bilateral depth smoothing** (`bilateral_d=5`): edge-preserving smoothing of the depth map kills prediction noise on flat surfaces before any subsequent gate sees it.
+2. **Stride sampling** (`pixel_stride=2`): every 2nd pixel in (y, x). Cuts pixel count 4× at the source.
+3. **Absolute confidence floor** (`conf_min=0.15`): drop pixels where `depth_conf < 0.15`. The old `spatiality` repo used 0.20; v2 ships looser so textureless walls and floor survive.
+4. **Far-cap** (`depth_far_pct=95.0`, `depth_far_mult=1.5`): drop pixels deeper than `1.5 × P95(depth)` per frame. Catches the enormous low-confidence depths VGGT predicts for sky and distant background that would otherwise project as huge floaters.
+5. **Depth-gradient silhouette guard** (`depth_grad_max=0.06`): drop pixels where `|∇depth| / depth > 0.06`. These are object-silhouette edges where depth is unreliable; without this filter they project as floaters bridging foreground and background.
+6. **Global random subsample** (`target_count=50_000_000`): caps total cloud size so the viewer's streaming PLY parser can handle it. Set `None` to disable.
 
 Items 1, 4, and 5 were ported from the v1 `spatiality` repo after v2's initial "no postprocessing" version produced visibly unusable clouds (sky floaters, silhouette webs). The funnel sizes at each stage are printed at run time so regressions are visible in the log.
 
@@ -263,9 +263,9 @@ See `segmentation/scene_scout.py`.
 
 Open-vocab discovery is non-deterministic. A common indoor object (a ceiling light, a closet) can be silently absent from any given slice if Gemini happened to look at a frame where it's occluded or out of view.
 
-A **5-phrase** safety net — `door`, `clothes rack`, `closet`, `laundry bag`, `ceiling light` (`segmentation/scene_scout.py::_GLOBAL_SAFETY_NET`) — gets unioned into the GDINO query with `frame_range=None` so these phrases always propagate over the whole video. Each item adds one phrase to the multi-phrase GDINO query, which scales sub-linearly in the text encoder, so wall-clock cost is negligible.
+A **5-phrase** safety net (`door`, `clothes rack`, `closet`, `laundry bag`, `ceiling light` from `segmentation/scene_scout.py::_GLOBAL_SAFETY_NET`) gets unioned into the GDINO query with `frame_range=None` so these phrases always propagate over the whole video. Each item adds one phrase to the multi-phrase GDINO query, which scales sub-linearly in the text encoder, so wall-clock cost is negligible.
 
-The list is intentionally *short and conservative*. It doesn't include "wall" or "floor" because those are scene labels we explicitly ban in Lane B's prompt. It doesn't include high-recall scout categories (chair, table, sofa) because the scout already finds those reliably — the safety net is only for items the scout *empirically* missed in real captures.
+The list is intentionally *short and conservative*. It doesn't include "wall" or "floor" because those are scene labels we explicitly ban in Lane B's prompt. It doesn't include high-recall scout categories (chair, table, sofa) because the scout already finds those reliably, the safety net is only for items the scout *empirically* missed in real captures.
 
 &nbsp;
 
@@ -536,7 +536,7 @@ Six independent checkpoints, each at the granularity of a single user-visible un
 
 | Checkpoint | Granularity | Recovers |
 |---|---|---|
-| `_forward_preds.pt` | 1 forward pass | the ~4 min A100 forward |
+| `_forward_preds.pt` | 1 forward pass | the ~5–6 min A100 forward |
 | `scout_prompts.json` | 1 scout fan-out | 20 Gemini calls |
 | `tracks.json` | 1 GDINO sweep | the multi-phrase detection sweep |
 | `_lifted_tracks_v2.pkl` | full lift output | every per-track lift plus multi-view filter |
@@ -611,7 +611,7 @@ The accuracy story compared to the v1 pipeline (the original `spatiality` repo):
 
 The wallclock story:
 
-- Pipeline end-to-end: **~8 to 14 minutes** for a 500-frame indoor capture, vs **~25 to 35 minutes** for the SAM-3.1-based predecessor.
+- Pipeline end-to-end: **~14 to 19 minutes** for a 500-frame indoor capture, vs **~25 to 35 minutes** for the SAM-3.1-based predecessor.
 
 - Most of the savings are from deleting SAM 2/3.1 video propagation. The rest is from per-slice scope filtering on GDINO and from caching scout output on resume.
 

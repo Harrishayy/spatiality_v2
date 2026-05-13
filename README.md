@@ -8,7 +8,7 @@ No SfM rig, no calibration, no manual labelling. Walk through a room with your p
 
 Built as a submission for the [Humanoid](https://jobs.ashbyhq.com/humanoid) Perception & Spatial AI internship challenge.
 
-> _If you're a reviewer:_ click the live demo above to see the system end-to-end in one click; then read [What's novel](#whats-novel) for the design decisions.
+> _If you're a reviewer:_ click the live demo above to see the system end-to-end in one click; then read [Architecture](#architecture) and [What's novel](#whats-novel) for the design decisions. For information on the design choices + tradeoff, read [Design Choices](#design-choices)
 
 &nbsp;
 
@@ -34,10 +34,51 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
   [`web/next.config.mjs`](web/next.config.mjs). No demo data is committed
   to the repo. Same URL works locally with the same env var set:
   `cd web && NEXT_PUBLIC_DEMO_CDN_URL=https://<bucket>.r2.dev pnpm dev`.
-- **Download the full demo scene for offline use** (optional, ≈ 1.3 GB)
-  via the GitHub Release. Unzip into `backend/data/outputs/demo_piece/`
-  and run the local FastAPI orchestrator (`uvicorn backend.main:app
-  --port 8765`) to view at full quality without R2.
+- **Download the full demo scene for offline use** (optional, ≈ 1.3 GB).
+  Pulls the same scene the hosted demo serves, but locally and at full
+  PLY quality. **No Modal account, no GPU, no API keys, no ffmpeg
+  needed**: you're only viewing a pre-baked scene, not running the
+  pipeline.
+
+  Prereqs: Python 3.12, [pnpm](https://pnpm.io/installation), and ~3 GB
+  free disk. Then:
+
+  ```bash
+  # 1. Clone and enter the repo.
+  git clone https://github.com/Harrishayy/spatiality_v2.git
+  cd spatiality_v2
+
+  # 2. Grab the demo zip from the latest GitHub Release and drop the
+  #    scene under backend/data/outputs/. The zip's top-level folder is
+  #    already named demo_piece/, so it lands at the right path.
+  mkdir -p backend/data/outputs
+  curl -L -o /tmp/demo_piece_full.zip \
+    https://github.com/Harrishayy/spatiality_v2/releases/latest/download/demo_piece_full.zip
+  unzip /tmp/demo_piece_full.zip -d backend/data/outputs/
+
+  # 3. Install the laptop-side backend deps (FastAPI + uvicorn +
+  #    multipart, declared in backend/pyproject.toml; no torch, no
+  #    Gemini SDK, no GPU runtime).
+  python3.12 -m venv .venv
+  source .venv/bin/activate
+  pip install -e ./backend
+
+  # 4. Install web deps.
+  cd web
+  pnpm install
+  cd ..
+
+  # 5. Start the orchestrator on :8765 (serves /api/jobs/<id> and
+  #    /artifacts/scenes/<id>/* from backend/data/outputs/).
+  uvicorn backend.main:app --port 8765 --reload &
+
+  # 6. Start the viewer on :3000 in a second shell.
+  cd web && pnpm dev
+  ```
+
+  Then open `http://localhost:3000/scenes/demo_piece`. The viewer
+  streams the 1.3 GB `points.ply` straight from disk, so it's faster
+  and higher-fidelity than the R2-routed hosted demo.
 - **Run it yourself on your own scene**: see [Run it locally](#run-it-locally) below.
 - **What you get**, at the end of a run in `backend/data/outputs/<scene_id>/`:
 
@@ -80,7 +121,7 @@ Two parallel branches fork off the dense cloud and rejoin in the viewer:
 
 The Next.js viewer fetches all three outputs and renders them as one orbitable scene with a labelled inventory and the top-down minimap.
 
-Long-form, stage by stage, in [`PIPELINE.md`](PIPELINE.md). Decisions, rejected alternatives, and stage-by-stage rationale in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md). A 400-word reviewer-targeted summary in [`docs/DESIGN_NOTES.md`](docs/DESIGN_NOTES.md).
+Long-form, stage by stage, in [`docs/PIPELINE.md`](docs/PIPELINE.md). Decisions, rejected alternatives, and stage-by-stage rationale in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md).
 
 &nbsp;
 
@@ -100,7 +141,7 @@ The pipeline composes off-the-shelf components, but five choices materially chan
 
 ## Stack
 
-The compute side is two Modal apps, not one per model. `spatiality-inference` runs FlashVGGT alone on A100-80GB; everything else (scout, detector, re-ID, masks, both labelling passes, capture-map post-process) runs **inside one shared `spatiality-segmentation` container instance** on A100-40GB — same warm GPU, persistent SAM 2.1 encoder cache, no per-model cold-starts.
+The compute side is two Modal apps, not one per model. `spatiality-inference` runs FlashVGGT alone on A100-80GB; everything else (scout, detector, re-ID, masks, both labelling passes, capture-map post-process) runs **inside one shared `spatiality-segmentation` container instance** on A100-40GB; same warm GPU, persistent SAM 2.1 encoder cache, no per-model cold-starts.
 
 | Component | Modal app | GPU | What |
 |---|---|---|---|
@@ -226,7 +267,7 @@ The web UI does not need Modal, it just serves files from `backend/data/outputs/
 |---|---|
 | End-to-end wall clock | ~14–19 min (500 frames, full Lanes B + C + Stage 4) |
 | FlashVGGT forward pass | ~5–6 min on A100-80GB |
-| Modal cost per scene | ~$0.30–$0.60 |
+| Modal cost per scene | ~$0.70–$1.20 |
 | Gemini cost per scene | ~$0.05–$0.15 (scout + ~30 Lane B calls + 1 Lane C) |
 | Disk per scene | ~3 GB on Modal |
 
@@ -234,15 +275,61 @@ The orchestrator's [`_PULL_SKIP_PREFIXES`](backend/main.py) skips pipeline-inter
 
 &nbsp;
 
-## Limits and future work
+## Design choices
 
-Things I'd ship next if this were a 3-month internship rather than a portfolio piece:
+The full rationale, with every alternative I considered and the failure mode that ruled it out, lives in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) (~600 lines, 14 sections). The shape of the doc in four paragraphs:
 
-- **Drop the FlashVGGT pyproject patch**, upstream's `pyproject.toml` is broken (missing package includes); [`patches/flashvggt_pyproject.toml`](patches/flashvggt_pyproject.toml) carries a fix. PR open against the upstream is the right home for it.
-- **3D capture-map overlay**, Stage 4 currently surfaces the density grid as a top-down PNG card. Lifting it into the three.js scene as a translucent floor-plane texture (using the `u/v/up` basis already stored in `capture_map.json`) is ~1 day of work and makes the capture story land harder.
-- **VLA-style "where is the X?" query**, the labels and grid together are everything you need for "find me the chair, then plan a path to its front." Hooks for a text-box → goal-pose loop are obvious next.
-- **Real evaluation harness**, mAP / 3D-OBB IoU / pose RMS against a small set of hand-annotated scenes. Today's "what works" is observational, not numerical.
-- **Reduce sample-PLY size for sharing**, 50 M points / ~800 MB is fine for one's own laptop, painful for a hosted demo. A LOD or octree downsample is the lever.
+- **Geometry (§1–§2).** FlashVGGT single forward beats chunked solves (which pin each chunk's first frame at the origin and produce N disjoint rooms overlapping at zero), DUSt3R/MASt3R (pair-based, weak at long handheld sequences), and COLMAP-style SfM (10s of minutes per scene, brittle on textureless walls and motion blur). VGGT-1B stays as a transparent fallback for short clips and for any case where the FlashVGGT image fails to build. A Laplacian-variance blur pre-filter drops the worst 20 % of frames before the pose head ever sees them: the single highest-impact fix for handheld phone captures, because one blurry frame can push the chunked-attention feature bank off by `> 30° ΔR`. The orchestrator ffmpeg-oversamples by 1.30× so the post-filter count lands on target.
+- **Semantics (§3–§6).** Open-vocab discovery via a Gemini "scene scout" replaces fixed-taxonomy detectors and "kitchen-sink everything" GDINO queries; the scout proposes phrases per temporal slice and GDINO fires those phrases only within their slice windows (+15-frame padding), with cross-phrase NMS at IoU 0.7 to stop two synonyms forking the same object into parallel tracklets. SAM 3.1 mask propagation was tried and dropped (~10 min per scene for masks the lift didn't consume); SAM 2.1-hiera-tiny stays as an opportunistic single-frame mask inside the 3-D lift. The 3-D lift itself reads each pixel's xyz directly from VGGT's `world_points` tensor (no manual `K⁻¹ · depth · pixel` unprojection) and keeps points only if they reproject into ≥ 50 % of other frames' SAM masks, killing the "floor bleed" failure mode where unmasked floor pixels get pinned to whichever object is closest.
+- **Labelling and operations (§7–§11).** Two-pass Gemini 2.5 Flash via PydanticAI: Lane B labels every track in isolation, then Lane C reviews the whole scene in one Gemini call and is allowed to relabel, drop, or merge. Anthropic and OpenAI VLMs were considered; Gemini Flash won on multi-image latency and per-scene cost (~5–10× cheaper than Claude Sonnet on this token mix). The VLM is swappable via `SPATIALITY_VLM_MODEL`; `backend/src/spatiality/segmentation/vlm.py` is the only file that knows the model id, so the closed-API dependency is one env var away from being replaced. Lane B checkpoints **per track** (an earlier per-loop flush lost 24 labels to one cancellation), and the lifted-tracks pickle carries a `_v2` schema suffix so an older pickle never silently loads into the trimmed dataclass. Confidence calibration multiplies VLM confidence by a corroboration factor combining track length and mean VGGT depth-confidence.
+- **Stage 4 capture map.** Intentionally uses **no model**. Points + cameras already encode all the geometry the layer needs; floor extraction is robust statistics (mode of the lower percentile of point heights after a histogram pass), and the top-down rasterisation is numpy + Pillow. An earlier humanoid-traversability framing was dropped because handheld captures rarely contain enough floor pixels to support that inference honestly; the capture map is what every run can produce meaningfully, and ships as both a JSON density grid and a PNG preview.
+- **§0 philosophy.** Simple beats clever when simple works; single forward over the whole sequence beats chunking; per-unit checkpointing beats per-stage flushes; VLMs on labelling and judgement, never on geometry; class-conditional priors beat scene-relative ones; speed matters because the bank balance does (every A100-second is personally invoiced).
+
+&nbsp;
+
+### Tradeoffs and future work
+
+#### Tradeoffs
+
+Every choice above buys something and costs something. The costs:
+
+- **The VLM mislabels confidently and often.** Gemini 2.5 Flash is given a 3×3 anchor grid plus orbital novel-view renders per track and asked to name what it sees. Real failures from the `demo_piece` run: a hard drive labelled "portable speaker", a headphone box also labelled "portable speaker", a glossy door reflection labelled "recessed light". Lane C catches some cross-scene inconsistencies (a stroller in a closed bedroom, two synonyms for the same chair) but not visually-plausible single-track wrongness. We down-weight VLM confidence by track length and mean depth-conf, but we don't penalise "confident and wrong" specifically because we have no calibration set to learn from. This is the single largest source of user-visible errors.
+- **Closed-vocab safety net is hand-picked.** Five phrases (`door`, `clothes rack`, `closet`, `laundry bag`, `ceiling light`) are hard-coded because the open-vocab scout *empirically* missed them on the scenes I tested. Honest but obviously not scalable. The correct fix is auto-learning a per-scene-type prior; the current list is a Python literal someone has to remember to edit.
+- **Multi-view ≥ 50 % rule is a sledgehammer.** It cuts the floor-bleed failure mode, but it also drops legitimate object pixels glimpsed in only a handful of oblique frames. The 50 % is hand-tuned; the honest answer is a learned curve, not a step.
+- **Blur pre-filter is opinionated.** Dropping the bottom 20 % by Laplacian variance assumes the bottom 20 % is always wrong. On very steady captures it can drop frames that were fine; on very shaky captures it under-drops, and the pose head still drifts.
+- **Hardware floor.** FlashVGGT single-forward on 500 frames needs an A100-80GB. The base-VGGT fallback can run on smaller cards for short clips, but the long-sequence quality story doesn't survive the fallback.
+- **SAM 2.1 is still in the segmentation image.** We dropped SAM 3.1 video propagation but kept SAM 2.1 single-frame masks for the 3-D lift. That keeps the segmentation Modal image larger than strictly necessary and re-introduces SAM's CUDA-flag fragility on rebuilds.
+- **DINOv2 re-ID is appearance-only.** Two visually similar chairs at opposite ends of a room can fuse into one tracklet if their bbox-motion lets them. The 3-D OBB-merge dedupe catches most of these post-hoc, but it's a backstop, not a fix.
+- **One demo scene proves nothing.** The published `demo_piece` was captured carefully (steady pan, even lighting, indoor furniture). Reviewers running on their own clips should expect more variance than the hosted demo implies. There's no evaluation harness so "this works" is observational.
+- **All thresholds are hand-tuned.** `conf_min=0.15`, `depth_far_pct=95`, `depth_grad_max=0.06`, `target_count=50 M`, multi-view ≥ 50 %, blur drop 20 %, scout 70-phrase cap, NMS IoU 0.7, OBB-merge IoU 0.5, DBSCAN eps 0.3 m, AABB-IoU 0.3, cluster 70 %. Each has an empirical justification in `docs/DESIGN_DECISIONS.md` but none has a learned prior behind it.
+- **Pipeline is offline batch.** End-to-end is ~14–19 minutes per scene; nothing here is interactive or streaming. A "walk around and see annotations appear" loop is much more work than this.
+
+#### Future work
+
+If I was doing this full-time rather than as a portfolio piece, the order I'd ship in:
+
+**Annotation accuracy** (kills the failures listed in Tradeoffs):
+
+- **Mask-conditioned VLM prompt + OBB dimensions.** Alpha-cut the background using the SAM 2.1 mask and pass `"≈ 14 × 9 × 2 cm at 0.75 m height"` into the prompt. Makes "portable speaker" geometrically impossible for a hard drive.
+- **Reproject-and-verify.** Replace open naming with "is the highlighted region a {top-K candidate}?", OBB drawn back as a wireframe. VLMs are better at yes/no than open classification.
+- **Specular-aware track rejection.** Drop tracks whose `world_points_conf` is low *and* whose lifted height contradicts a class-prior (lights at ceiling, etc.). Kills door-reflection → recessed-light without an API call.
+
+**Geometry on top of VGGT:**
+
+- **Plane-constrained bundle adjust.** Use detected floor / wall / ceiling planes as a Manhattan-world prior to refine VGGT extrinsics. Expected: 5–15 cm tighter centroids and a cleaner gravity vector for Stage 4.
+- **Mask-aware depth smoothing in the lift.** Smooth VGGT depth within SAM masks, free across mask boundaries. Replaces the current step-function `depth_grad_max` guard.
+- **Surface reconstruction (TSDF / Poisson) on the cleaned cloud.** Gives the navigation layer real surfaces instead of points; a more principled way to suppress floaters than the 6-gate filter cascade.
+- **3D Gaussian Splatting export over the VGGT cameras.** Captures specular and view-dependent surfaces VGGT depth misses, and rasterises better than 50 M-point PLYs in browser.
+
+**Backbone benchmarking:**
+
+- **Quantitatively re-trial dense-pose backbones.** DUSt3R / MASt3R were dropped on engineering simplicity, never measured. Plus untried newer ones: [Spann3R](https://github.com/HengyiWang/spann3r), [CUT3R](https://github.com/CUT3R/CUT3R), [Fast3R](https://github.com/facebookresearch/fast3r), [VGGSfM](https://github.com/facebookresearch/vggsfm). The point isn't to switch blindly; it's to know quantitatively where FlashVGGT wins and where it doesn't.
+
+**Measurement, vendor independence, chore:**
+
+- **Calibration set + eval harness.** mAP / 3D-OBB IoU / pose RMS on hand-annotated scenes. Unlocks everything above; the only honest fix for the "confident wrong label" mode.
+- **Open-source VLM swap.** [SmolVLM](https://huggingface.co/HuggingFaceTB/SmolVLM-Instruct), [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL), [LLaVA-OneVision](https://github.com/LLaVA-VL/LLaVA-NeXT), or [Idefics](https://huggingface.co/HuggingFaceM4): drops cost to ~$0 and kills the closed-API dependency.
+- **Drop the FlashVGGT `pyproject` patch.** Land [`patches/flashvggt_pyproject.toml`](patches/flashvggt_pyproject.toml) upstream as a PR.
 
 &nbsp;
 

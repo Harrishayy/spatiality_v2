@@ -42,7 +42,7 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
   scene, not running the pipeline.
 
   Everything is published as assets on the
-  [`demo-piece-v1` GitHub Release](https://github.com/Harrishayy/spatiality_v2/releases/tag/demo-piece-v1):
+  [`demo-piece-v1`](https://github.com/Harrishayy/spatiality_v2/releases/tag/demo-piece-v1):
 
   - [`demo_piece_outputs.zip`](https://github.com/Harrishayy/spatiality_v2/releases/download/demo-piece-v1/demo_piece_outputs.zip) (≈ 1.3 GB) — `points.ply`, all annotation files, `cameras.json`, `tracks.json`, `capture_map.{json,png}`, `evidence/`, `masks/`, `manifest.json`. **This is the only file you need to view the demo locally.**
   - [`demo_piece_inputs.zip`](https://github.com/Harrishayy/spatiality_v2/releases/download/demo-piece-v1/demo_piece_inputs.zip) (≈ 1.5 GB) — original `source.mp4` capture and the 900 frames the pipeline ingested. Optional; only needed if you want to inspect the raw input or re-run the pipeline.

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { FreespaceCard } from "@/components/FreespaceCard";
+import { CaptureMapCard } from "@/components/CaptureMapCard";
 import { Header } from "@/components/Header";
 import { PipelineProgress } from "@/components/PipelineProgress";
 import {
@@ -27,10 +27,10 @@ export default function ScenePage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const sceneId = params?.id ?? "";
-  const { manifest, annotations, discarded, pointsUrl, pointsReady, segReady } = useScene(sceneId);
+  const { manifest, annotations, discarded, pointsUrl, cameraCenters, pointsReady, segReady } = useScene(sceneId);
   const { messages, send } = useChat(sceneId);
   const selectedId = useUI((s) => s.selectedId);
-  const showFreespace = useUI((s) => s.showFreespace);
+  const showCaptureMap = useUI((s) => s.showCaptureMap);
   const [openSection, setOpenSection] = useState<SceneSection | null>(null);
 
   // Stale scene_id (deleted on disk, often comes from localStorage pointing
@@ -57,6 +57,12 @@ export default function ScenePage() {
   const annos = useMemo(() => annotations.data ?? [], [annotations.data]);
   const discardedAnnos = useMemo(() => discarded.data ?? [], [discarded.data]);
   const emptyCloud = (m?.stats.splat_size_mb ?? 0) <= 0.001;
+  // Stage 4 ground-plane metadata. When present, the viewer rotates the
+  // scene so gravity aligns with +Y and the floor sits at Y=0.
+  const captureMapUrl = useMemo(() => {
+    const art = m?.artifacts?.capture_map_json;
+    return art ? `/artifacts/scenes/${encodeURIComponent(sceneId)}/${art}` : undefined;
+  }, [m?.artifacts?.capture_map_json, sceneId]);
   const segStatus: StageStatus = m?.stages.segmentation.status ?? "pending";
   const failed = m?.status === "failed";
 
@@ -70,7 +76,9 @@ export default function ScenePage() {
             <PointCloudViewer
               pointsUrl={pointsUrl.data}
               annotations={annos}
+              cameraCenters={cameraCenters.data ?? []}
               emptyCloud={emptyCloud}
+              captureMapUrl={captureMapUrl}
             />
           ) : (
             <PipelinePending manifest={m} failed={failed} />
@@ -87,8 +95,8 @@ export default function ScenePage() {
             />
           )}
 
-          {pointsReady && showFreespace && m && (
-            <FreespaceCard sceneId={sceneId} manifest={m} />
+          {pointsReady && showCaptureMap && m && (
+            <CaptureMapCard sceneId={sceneId} manifest={m} />
           )}
 
           {m && (

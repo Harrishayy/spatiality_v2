@@ -1,8 +1,8 @@
 # spatiality_v2
 
-**Phone video → 3D scene + open-vocabulary semantic labels + humanoid-traversable free-space map.**
+**Phone video → 3D scene + open-vocabulary semantic labels + top-down capture map.**
 
-No SfM rig, no calibration, no manual labelling. Walk through a room with your phone; get back a point cloud you can orbit, a labelled inventory of every object, and a 2D occupancy grid telling a humanoid robot which floor cells it can stand on without colliding.
+No SfM rig, no calibration, no manual labelling. Walk through a room with your phone; get back a point cloud you can orbit, a labelled inventory of every object, and a 2D top-down density map of what was captured.
 
 Built as a submission for the [Humanoid](https://jobs.ashbyhq.com/humanoid) Perception & Spatial AI internship challenge.
 
@@ -21,9 +21,9 @@ A humanoid platform doing real work in a building needs three things from its en
 
 - **Dense geometry** for footing, contact, and obstacle avoidance.
 - **Open-vocabulary semantics** so a high-level planner can be told "go to the kitchen counter" without retraining a fixed-taxonomy detector for every site.
-- **A locomotion-planner-ready map** — not just a mesh, an *occupancy grid at robot height* with traversable / obstacle / unknown labels.
+- **A spatial map of the capture** — a top-down footprint of what was observed, so a planner knows where surfaces sit and how much of the room was actually covered.
 
-spatiality_v2 produces all three from a single handheld phone capture. The same artefacts (point cloud, labelled tracks, traversability grid) are exactly what a navigation stack would consume — this is the building-block layer for embodied AI, not a research demo of a single component.
+spatiality_v2 produces all three from a single handheld phone capture. The same artefacts (point cloud, labelled tracks, capture map) are the building-block layer a navigation stack consumes — not a research demo of a single component.
 
 &nbsp;
 
@@ -32,7 +32,7 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
 <!-- TODO(maintainer): replace this placeholder with the deployed URL. -->
 - **Hosted demo**: _(coming — paste Vercel URL here)_ — opens on
   `/scenes/demo_piece`, no install, no Modal, no FastAPI. The full scene
-  (1.3 GB `points.ply` plus all annotations, traversability, evidence
+  (1.3 GB `points.ply` plus all annotations, capture map, evidence
   crops, and masks) lives in a Cloudflare R2 bucket; the deployed site
   routes the viewer's manifest + artefact fetches to R2 via the
   `NEXT_PUBLIC_DEMO_CDN_URL` rewrite in
@@ -51,8 +51,8 @@ spatiality_v2 produces all three from a single handheld phone capture. The same 
   points.ply                # 12–50 M coloured points (xyz+rgb+confidence)
   cameras.json              # per-frame K, R, t (OpenCV convention)
   annotations.c.json        # open-vocab 3D-labelled objects, coherence-reviewed
-  traversability.json       # 5 cm occupancy grid + metadata (Stage 5)
-  traversability.png        # top-down preview, camera path overlaid
+  capture_map.json          # 5 cm top-down density grid (Stage 4)
+  capture_map.png           # top-down preview of the captured footprint
   ```
 
 &nbsp;
@@ -65,7 +65,7 @@ The pipeline composes off-the-shelf components, but five choices are domain-spec
 2. **Scoped Gemini scout instead of a fixed taxonomy** — instead of querying Grounding DINO with a closed-class noun list (or kitchen-sink everything), a VLM looks at temporal slices of the video, proposes the phrases it actually sees, and GDINO only fires those phrases within their slice windows. Open-vocab without the false-positive deluge. [`backend/src/spatiality/segmentation/scene_scout.py`](backend/src/spatiality/segmentation/scene_scout.py).
 3. **Multi-view consistency filter for the 3D lift** — each pixel's world point is reprojected into other frames and only kept if it lands inside SAM 2.1 masks in ≥ 50 % of views. Kills the "floor-bleed" failure mode where unmasked floor pixels get pinned to whatever object happens to be near them. [`backend/src/spatiality/segmentation/lift.py:380`](backend/src/spatiality/segmentation/lift.py).
 4. **Per-track checkpoint flush, not per-stage** — Lane B used to write annotations at end-of-loop; one cancellation lost 24 labels. Flushing immediately after every Gemini response means a cancellation costs you one missing track, not the whole scene. Operational maturity over cleverness. [`backend/src/spatiality/segmentation/lane_b.py`](backend/src/spatiality/segmentation/lane_b.py).
-5. **Stage 5: free-space / traversability grid** — turns a labelled 3D scene into a 5 cm occupancy grid at robot height (ankle / knee / hip / head bands), with obstacle inflation by the robot's body radius. CPU only, no extra model. The grid plus the labelled tracks are exactly the inputs a humanoid locomotion planner consumes. [`backend/src/spatiality/nav/freespace.py`](backend/src/spatiality/nav/freespace.py).
+5. **Stage 4: capture map** — top-down 2D density map of above-floor surfaces in the captured scene. We tried a humanoid traversability/free-space framing first, but handheld captures don't observe enough floor for that inference to be honest; pivoting to "show what we actually saw" is what every run can produce meaningfully. CPU only, no extra model. [`backend/src/spatiality/nav/capture_map.py`](backend/src/spatiality/nav/capture_map.py).
 
 The long-form rationale (what we tried first, why it didn't work, alternatives rejected) lives in [`DESIGN_DECISIONS.md`](DESIGN_DECISIONS.md). A 400-word reviewer-targeted summary is in [`docs/DESIGN_NOTES.md`](docs/DESIGN_NOTES.md).
 
@@ -86,9 +86,9 @@ flowchart LR
     lift --> laneB["Lane B<br/>per-track VLM"]
     laneB --> laneC["Lane C<br/>coherence review"]
     laneC --> annotations["annotations.c.json"]
-    ply --> freespace["Stage 5<br/>traversability grid"]
-    freespace --> nav["traversability.{json,png}"]
-    annotations --> viewer["Next.js viewer<br/>point cloud + labels + free-space"]
+    ply --> capmap["Stage 4<br/>capture map"]
+    capmap --> nav["capture_map.{json,png}"]
+    annotations --> viewer["Next.js viewer<br/>point cloud + labels + capture map"]
     nav --> viewer
 ```
 
@@ -227,7 +227,7 @@ The orchestrator's [`_PULL_SKIP_PREFIXES`](backend/main.py) skips pipeline-inter
 Things I'd ship next if this were a 3-month internship rather than a portfolio piece:
 
 - **Drop the FlashVGGT pyproject patch** — upstream's `pyproject.toml` is broken (missing package includes); [`patches/flashvggt_pyproject.toml`](patches/flashvggt_pyproject.toml) carries a fix. PR open against the upstream is the right home for it.
-- **3D free-space overlay** — Stage 5 currently surfaces the grid as a top-down PNG card. Lifting it into the three.js scene as a translucent plane at floor height (using the `u/v/up` basis already stored in `traversability.json`) is ~1 day of work and makes the geometry/locomotion-planning story land harder.
+- **3D capture-map overlay** — Stage 4 currently surfaces the density grid as a top-down PNG card. Lifting it into the three.js scene as a translucent floor-plane texture (using the `u/v/up` basis already stored in `capture_map.json`) is ~1 day of work and makes the capture story land harder.
 - **VLA-style "where is the X?" query** — the labels and grid together are everything you need for "find me the chair, then plan a path to its front." Hooks for a text-box → goal-pose loop are obvious next.
 - **Real evaluation harness** — mAP / 3D-OBB IoU / pose RMS against a small set of hand-annotated scenes. Today's "what works" is observational, not numerical.
 - **Reduce sample-PLY size for sharing** — 50 M points / ~800 MB is fine for one's own laptop, painful for a hosted demo. A LOD or octree downsample is the lever.
@@ -241,11 +241,11 @@ backend/
   main.py                  FastAPI orchestrator (laptop, port 8765)
   modal/
     inference.py           Modal app: spatiality-inference (FlashVGGT)
-    segmentation.py        Modal app: spatiality-segmentation (GDINO + lift + Lane B/C + Stage 5)
+    segmentation.py        Modal app: spatiality-segmentation (GDINO + lift + Lane B/C + Stage 4)
   src/spatiality/
     inference/             FlashVGGT runner, frame select, PLY writer
     segmentation/          GDINO, re-ID, lift, lane_b, lane_c, postprocess
-    nav/freespace.py       Stage 5 — humanoid traversability grid
+    nav/capture_map.py     Stage 4 — top-down density map of captured scene
 scripts/
   run_pipeline_cli.py      Headless end-to-end driver (Modal path)
   run_local_gpu.py         Local-CUDA end-to-end driver (no Modal — experimental)

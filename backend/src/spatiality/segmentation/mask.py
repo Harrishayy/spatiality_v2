@@ -1,6 +1,6 @@
 """SAM 2.1-hiera-tiny single-frame mask predictor for the lift stage.
 
-Stage 3 used to sample a 5×5 grid inside an inset of the GDINO bbox. That
+Stage 3.5 used to sample a 5×5 grid inside an inset of the GDINO bbox. That
 heuristic threw out boundary pixels but still mixed background into the
 unprojection — fine for centred convex objects, fragile for thin /
 articulated / U-shaped ones (chair frames, lamp poles, plants).
@@ -13,7 +13,7 @@ same frame is just the decoder pass.
 Public API:
   - :class:`SamMaskPredictor` — wraps SAM 2.1's ``SAM2ImagePredictor`` with
     per-frame encoder caching. Use as a context manager so the model is
-    freed after Stage 3 completes.
+    freed after Stage 3.5 completes.
   - :func:`build_predictor` — returns either the live predictor or
     ``None`` if SAM is unavailable / disabled, so callers can transparently
     fall back to the bbox-interior grid.

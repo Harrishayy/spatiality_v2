@@ -1,6 +1,6 @@
 """Inference entrypoint.
 
-Stage 1 of the pipeline. Reads frames from the inputs volume, runs
+Stage 2 of the pipeline. Reads frames from the inputs volume, runs
 FlashVGGT/VGGT, and writes the geometry artefacts segmentation will consume.
 
 Outputs (relative to ``$SPATIALITY_ARTEFACTS_ROOT/<input_id>/``):
@@ -229,7 +229,7 @@ def run(input_id: str, **kwargs) -> dict:
     # the UI evidence gallery can serve them.
     print(f"[stage:poses] writing {len(results)} depth + conf + frame copies …", flush=True)
     t_write = time.time()
-    # World-points stride for storage. Stage 3's lift only consumes
+    # World-points stride for storage. Stage 3.5's lift only consumes
     # per-mask-pixel lookups, so a half-resolution copy is plenty and cuts
     # disk by 4× (1474×1472×6 bytes/frame × 573 frames ≈ 7.5 GB → ~1.9 GB
     # at stride-2). Stride-1 is exact; stride-4 is acceptable for very

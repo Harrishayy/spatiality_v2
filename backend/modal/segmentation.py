@@ -1,6 +1,6 @@
 """Modal container: Grounding DINO + mask-grade lift + Lane B/C labeling.
 
-Stage 2+ of the pipeline. Reads geometry artefacts from Stage 1 (points.ply,
+Stages 3 and 4 of the pipeline. Reads geometry artefacts from Stage 2 (points.ply,
 cameras.json, depth/, depth_conf/, frames/) and runs:
 
     - Scout      : Gemini 2.5 Flash discovers a noun-phrase vocabulary
@@ -238,7 +238,7 @@ def _pull_outputs_to_local(input_id: str) -> int:
     Shells out to ``modal volume get``, which downloads in parallel with
     checksums. The previous serial loop over ``volume.read_file`` was
     bottlenecked on per-file roundtrip latency for the 1500+ small depth /
-    frame artefacts produced by Stage 1.
+    frame artefacts produced by Stage 2.
     """
     import shutil
     import subprocess

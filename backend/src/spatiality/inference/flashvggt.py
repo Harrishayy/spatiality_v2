@@ -27,9 +27,9 @@ class FrameResult:
     The optional ``world_points`` and ``world_points_conf`` fields carry
     VGGT's point-head output (per-pixel world XYZ + confidence). They're
     additive over the pre-existing depth + camera path: when present,
-    Stage 3's lift can use them directly instead of re-deriving via manual
+    Stage 3.5's lift can use them directly instead of re-deriving via manual
     unprojection. When ``None`` (older inference runs, or VGGT variants
-    without the point head exposed), Stage 3 falls back transparently.
+    without the point head exposed), Stage 3.5 falls back transparently.
     """
 
     frame_id: str
@@ -333,7 +333,7 @@ def run_inference(
     # world-space (X, Y, Z) and a separate confidence in the *3D position*
     # (distinct from depth_conf, which is confidence in the scalar depth).
     # Both heads always run during a forward pass; this code just preserves
-    # them so Stage 3 can avoid re-deriving XYZ via manual unprojection.
+    # them so Stage 3.5 can avoid re-deriving XYZ via manual unprojection.
     # Cast to float16 — XYZ at metre precision doesn't need float32.
     world_points_all: np.ndarray | None = None
     world_points_conf_all: np.ndarray | None = None

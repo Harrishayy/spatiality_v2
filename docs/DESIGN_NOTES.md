@@ -24,6 +24,6 @@ Lanes B and C are heavy on multi-image grids (3×3 anchor frames + orbital novel
 
 ---
 
-Stage 5 (free-space / traversability grid) intentionally uses **no model**. The depth maps and points already encode all the geometry the layer needs; floor extraction is robust statistics (mode of the lower percentile after a histogram pass). Adding a learned occupancy predictor here would be more work, more failure modes, and worse coherence with the underlying point cloud.
+Stage 4 (capture map — top-down density of above-floor surfaces) intentionally uses **no model**. Points + cameras already encode all the geometry the layer needs; floor extraction is robust statistics (mode of the lower percentile after a histogram pass). An earlier humanoid-traversability framing was dropped because handheld captures rarely contain enough floor pixels to support that inference honestly — the capture map is what every run produces meaningfully.
 
 Full alternatives catalogue (SAM 3.1 / SAM 2 video / SpatialLM / OWL-ViT / Anthropic VLMs / Lanes E + F as scene graph + room layout, etc.) and the prior failure modes that informed each choice: [`../DESIGN_DECISIONS.md`](../DESIGN_DECISIONS.md).

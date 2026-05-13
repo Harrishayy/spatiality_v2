@@ -18,7 +18,7 @@
 #   1. Downloads a small sample video into backend/data/inputs/demo/source.mp4
 #   2. Invokes scripts/run_pipeline_cli.py, which mirrors what the FastAPI
 #      orchestrator does on every web upload (ffmpeg → push → inference →
-#      pull poses → segmentation + Stage 5 → pull all).
+#      pull poses → segmentation + Stage 4 → pull all).
 #   3. Leaves all artefacts under backend/data/outputs/demo/ so `pnpm dev`
 #      in web/ can render the scene at /scenes/demo.
 
@@ -29,34 +29,27 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INPUT_DIR="$REPO_ROOT/backend/data/inputs/$SCENE_ID"
 VIDEO_PATH="$INPUT_DIR/source.mp4"
 
-# Public URL of the sample capture. Replace with your own R2 / S3 link before
-# publishing. Keep clips under ~30 MB for a fast first run.
+# Bring your own video. Drop a phone-captured .mp4 at
+#   backend/data/inputs/demo/source.mp4
+# (override the path by setting SCENE_ID=foo → backend/data/inputs/foo/...).
+# Keep clips under ~30 MB / ~30 s for a fast first run; a short handheld
+# walk-through of an interior space works best.
 #
-# TODO(maintainer): host docs/sample_scene/source.mp4 (or pick any short
-# handheld interior clip) and paste the link here. The clip in our test
-# rotation is a ~20 s walk-through of a small office, ~25 MB at 1080p30.
-SAMPLE_URL="${SAMPLE_URL:-PLACEHOLDER_REPLACE_BEFORE_PUBLISH}"
-
-if [[ "$SAMPLE_URL" == "PLACEHOLDER_REPLACE_BEFORE_PUBLISH" ]]; then
-  cat <<'EOF' >&2
-demo.sh: SAMPLE_URL is unset. Either:
-  - set SAMPLE_URL to a public-readable .mp4 (R2 / S3 / Cloudflare R2)
-    and re-run:    SAMPLE_URL="https://…/source.mp4" bash scripts/demo.sh
-  - or drop your own video at  backend/data/inputs/demo/source.mp4
-    and re-run this script — it will skip the download step.
-
-This placeholder exists so the script itself is committable without bundling
-a 25 MB video into the git repo.
-EOF
-  if [[ ! -f "$VIDEO_PATH" ]]; then
-    exit 2
-  fi
-fi
-
+# If SAMPLE_URL is set, the script will fetch from there instead — handy for
+# CI or sharing a canonical clip with reviewers.
 mkdir -p "$INPUT_DIR"
 if [[ ! -f "$VIDEO_PATH" ]]; then
-  echo "[demo] downloading sample video → $VIDEO_PATH"
-  curl -fL --retry 3 -o "$VIDEO_PATH" "$SAMPLE_URL"
+  if [[ -n "${SAMPLE_URL:-}" ]]; then
+    echo "[demo] downloading sample video → $VIDEO_PATH"
+    curl -fL --retry 3 -o "$VIDEO_PATH" "$SAMPLE_URL"
+  else
+    cat <<EOF >&2
+demo.sh: no input video found at $VIDEO_PATH.
+Drop your own .mp4 there (or pass SAMPLE_URL=https://… to fetch one) and
+re-run this script.
+EOF
+    exit 2
+  fi
 else
   echo "[demo] reusing existing $VIDEO_PATH"
 fi

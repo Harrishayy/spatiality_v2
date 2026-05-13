@@ -31,10 +31,10 @@ interface UIState {
    *  the 3D scene. Toggled via the "Annotations" button in the toolbar. */
   showAnnotations: boolean;
   toggleAnnotations: () => void;
-  /** When true, the traversability grid overlay (Stage 5 — humanoid
-   *  free-space map) is shown as a translucent plane at floor height. */
-  showFreespace: boolean;
-  toggleFreespace: () => void;
+  /** When true, the Stage 4 capture-map card (top-down density + camera
+   *  path) is shown pinned to the top-left of the viewer. */
+  showCaptureMap: boolean;
+  toggleCaptureMap: () => void;
   /** Active labeling lane — controls which annotations.*.json the viewer
    *  reads. "b" is the default VLM-verified labels lane. */
   lane: Lane;
@@ -56,8 +56,8 @@ export const useUI = create<UIState>((set) => ({
   renderMode: "rgb",
   showAnnotations: true,
   toggleAnnotations: () => set((s) => ({ showAnnotations: !s.showAnnotations })),
-  showFreespace: false,
-  toggleFreespace: () => set((s) => ({ showFreespace: !s.showFreespace })),
+  showCaptureMap: false,
+  toggleCaptureMap: () => set((s) => ({ showCaptureMap: !s.showCaptureMap })),
   lane: "b",
   setSelected: (id) => set({ selectedId: id }),
   toggleIsolated: (id) =>

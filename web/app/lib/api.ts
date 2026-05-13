@@ -6,6 +6,7 @@ import type {
   Lane,
   LanePayload,
   Manifest,
+  Vec3,
 } from "./types";
 
 export function getArtifactUrl(sceneId: string, artifact: string): string {
@@ -98,6 +99,37 @@ export async function fetchDiscardedAnnotations(
   if (!res.ok) return [];
   const body = await res.json();
   return Array.isArray(body) ? (body as DiscardedAnnotation[]) : [];
+}
+
+/**
+ * Per-frame camera centers from cameras.json, in viewer frame.
+ *
+ * cameras.json stores OpenCV poses (X_cam = R · X_world + t), so the camera
+ * center in world is C = -Rᵀ·t. The viewer then applies the standard
+ * (x, -y, -z) flip used everywhere else (see useScene.ts) so the centers
+ * line up with the flipped point cloud + annotations.
+ *
+ * Returns [] when the artifact is missing (older scenes) or malformed.
+ */
+export async function fetchCameraCenters(sceneId: string): Promise<Vec3[]> {
+  const res = await fetch(getArtifactUrl(sceneId, "cameras.json"));
+  if (!res.ok) return [];
+  const body = await res.json().catch(() => null);
+  const frames = body && Array.isArray(body.frames) ? body.frames : [];
+  const out: Vec3[] = [];
+  for (const f of frames) {
+    const R = f?.R as number[][] | undefined;
+    const t = f?.t as number[] | undefined;
+    if (!R || R.length !== 3 || !t || t.length !== 3) continue;
+    // -Rᵀ·t — column i of Rᵀ is row i of R, so:
+    //   C[i] = -(R[0][i]*t[0] + R[1][i]*t[1] + R[2][i]*t[2])
+    const cx = -(R[0][0] * t[0] + R[1][0] * t[1] + R[2][0] * t[2]);
+    const cy = -(R[0][1] * t[0] + R[1][1] * t[1] + R[2][1] * t[2]);
+    const cz = -(R[0][2] * t[0] + R[1][2] * t[1] + R[2][2] * t[2]);
+    // OpenCV → viewer flip: (x, -y, -z).
+    out.push([cx, -cy, -cz]);
+  }
+  return out;
 }
 
 export async function fetchPointsUrl(sceneId: string): Promise<string> {

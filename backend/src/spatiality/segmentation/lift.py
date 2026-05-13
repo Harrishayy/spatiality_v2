@@ -1,6 +1,6 @@
 """3D pinning per track via bbox-depth unprojection.
 
-Each tracklet from Stage 2 has per-frame bboxes only (no SAM 2 masks). We
+Each tracklet from Stage 3.2 has per-frame bboxes only (no SAM 2 masks). We
 lift to 3D by:
 
   1. For each frame in the track: sample a 5×5 grid of pixels inside the
@@ -75,7 +75,7 @@ def _build_camera_lookup(
 def _load_camera(
     camera_lookup: dict, frame_id: str
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """Return (K, R, t) for ``frame_id`` or None if Stage 1 frame-selected it out."""
+    """Return (K, R, t) for ``frame_id`` or None if Stage 2 frame-selected it out."""
     return camera_lookup.get(frame_id)
 
 
@@ -292,7 +292,7 @@ def _load_frame_depth(
 ) -> tuple[TrackFrame, np.ndarray, np.ndarray] | None:
     """Worker: load (depth, conf) for one TrackFrame in parallel.
 
-    Returns None if any required file is missing (Stage 1 frame-selection).
+    Returns None if any required file is missing (Stage 2 frame-selection).
     """
     depth_path = out_dir / "depth" / f"{tf.frame_id}.npy"
     conf_path = out_dir / "depth_conf" / f"{tf.frame_id}.npy"

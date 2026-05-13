@@ -18,7 +18,7 @@ const STAGES: Stage[] = [
     title: "Capture",
     where: "laptop · ffmpeg",
     summary:
-      "Decode the upload and resample to ~500 evenly-spaced frames. Oversample to absorb the blur drop in stage 2 before mirroring to a Modal volume.",
+      "Decode the upload and resample to ~500 evenly-spaced frames. Oversample to absorb the blur drop in Stage 2 before mirroring to a Modal volume.",
     params: [
       { name: "max_frames", value: String(DEFAULT_SETTINGS.max_frames) },
       { name: "target_long_side", value: `${DEFAULT_SETTINGS.target_long_side} px` },
@@ -42,7 +42,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "3",
+    index: "3.1",
     title: "Scene scout",
     where: "Modal · Gemini 2.5 Flash",
     summary:
@@ -56,7 +56,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "4",
+    index: "3.2",
     title: "Detection",
     where: "Modal · Grounding DINO base",
     summary:
@@ -69,7 +69,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "5",
+    index: "3.3",
     title: "Re-ID embeddings",
     where: "Modal · DINOv2-small",
     summary:
@@ -82,7 +82,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "6",
+    index: "3.4",
     title: "IoU + appearance linker",
     where: "CPU · SORT-style greedy",
     summary:
@@ -97,7 +97,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "7",
+    index: "3.5",
     title: "3D lift",
     where: "Modal · SAM 2.1-hiera-tiny",
     summary:
@@ -114,7 +114,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "8",
+    index: "3.5",
     title: "OBB merge",
     where: "CPU · single-link clustering",
     summary:
@@ -126,7 +126,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "9",
+    index: "3.6",
     title: "Lane B — per-track labels",
     where: "Modal CPU + Gemini 2.5 Flash",
     summary:
@@ -143,7 +143,7 @@ const STAGES: Stage[] = [
     ],
   },
   {
-    index: "10",
+    index: "3.7",
     title: "Lane C — coherence pass",
     where: "Gemini 2.5 Flash · one call",
     summary:
@@ -155,6 +155,20 @@ const STAGES: Stage[] = [
       { name: "idempotency", value: "annotations.c.json short-circuits" },
     ],
   },
+  {
+    index: "4",
+    title: "Capture map",
+    where: "Modal CPU · numpy + Pillow",
+    summary:
+      "Top-down 2D map of the captured space — a density heatmap of above-floor surfaces showing what was observed and how much of the room was covered. Non-fatal: labels ship even if this fails.",
+    params: [
+      { name: "cell size", value: "5 cm" },
+      { name: "floor band", value: "densest 5 cm near 2nd-percentile height" },
+      { name: "density", value: "log-binned uint8 of above-floor point counts" },
+      { name: "bbox", value: "5th-percentile threshold + 3-cell margin" },
+      { name: "outputs", value: "capture_map.json · capture_map.png" },
+    ],
+  },
 ];
 
 export function PipelineOverview() {
@@ -164,23 +178,24 @@ export function PipelineOverview() {
         <div className="min-w-0">
           <h2 className="lp-surface-title">Pipeline overview</h2>
           <p className="lp-surface-sub break-words">
-            Ten stages from video to labelled 3D scene. Hyperparameters below
-            are the live defaults used for this run.
+            Four stages from video to labelled 3D scene, with Stage 3 broken
+            out into seven substages. Hyperparameters below are the live
+            defaults used for this run.
           </p>
         </div>
-        <span className="lp-eyebrow-mono whitespace-nowrap">10 stages</span>
+        <span className="lp-eyebrow-mono whitespace-nowrap">4 stages</span>
       </header>
 
       <ol className="grid min-h-0 min-w-0 flex-1 auto-rows-min grid-cols-1 content-start gap-3 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3">
         {STAGES.map((stage) => (
           <li
-            key={stage.index}
+            key={`${stage.index}-${stage.title}`}
             className="flex min-w-0 max-w-full flex-col gap-2 overflow-hidden rounded-[10px] border border-[rgba(255,235,220,0.08)] bg-[rgba(255,255,255,0.015)] p-3"
           >
             <div className="flex min-w-0 flex-col gap-0.5">
               <div className="flex min-w-0 items-baseline gap-2">
                 <span className="lp-eyebrow-mono opacity-70">
-                  {stage.index.padStart(2, "0")}
+                  {stage.index}
                 </span>
                 <span className="min-w-0 flex-1 break-words text-[13.5px] font-semibold tracking-[-0.01em] text-[var(--ink-100)]">
                   {stage.title}

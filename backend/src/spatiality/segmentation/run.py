@@ -1,20 +1,24 @@
-"""Segmentation orchestrator.
+"""Segmentation orchestrator (Stage 3 of the pipeline).
 
-Reads geometry artefacts from Stage 1 and runs the rest of the pipeline:
+Reads geometry artefacts from Stage 2 and runs the substages:
 
-  - Stage 2  : Grounding DINO detection + IoU tracklet linking
-  - Stage 3  : per-track 3D pinning (bbox-depth unprojection)
-  - Stage 4B : VLM-verified labels  → annotations.b.json (async, 16-way)
+  - Stage 3.1 : VLM scene scout
+  - Stage 3.2 : Grounding DINO detection + IoU tracklet linking (incl. 3.3 ReID, 3.4 linking)
+  - Stage 3.5 : per-track 3D pinning (bbox-depth unprojection)
+  - Stage 3.6 : Lane B per-track VLM labels  → annotations.b.json (async, 16-way)
+  - Stage 3.7 : Lane C whole-scene coherence → annotations.c.json
+
+Then triggers Stage 4 (capture map — top-down density of captured scene) on CPU.
 
 Lane E (scene-graph relations) and Lane F (SpatialLM layout) were removed
 2026-05-10 — they were not contributing to the VLM-labelling story we
 currently care about. Their modules / Modal deps are gone; if you bring
-relations back later, reintroduce as a separate stage.
+relations back later, reintroduce as a separate substage.
 
 Updates manifest.json so the frontend's stage waterfall reflects progress.
 
 The orchestrator is sync; Lane B runs inside its own asyncio event loop
-via ``asyncio.run(...)``. Stage 1.5 (`scene_scout`) uses its own
+via ``asyncio.run(...)``. Stage 3.1 (`scene_scout`) uses its own
 ``asyncio.run`` for scout's internal slice fan-out, so we keep it as a
 plain sync call from this module — nesting would raise
 ``RuntimeError: cannot be called from a running event loop``.
@@ -89,11 +93,11 @@ def _set_segmentation_status(
         artifacts["annotations_json"] = "annotations.c.json"
     else:
         artifacts.setdefault("annotations_json", "annotations.b.json")
-    # Stage 5: free-space / traversability grid (humanoid navigation layer).
-    if (scene_dir / "traversability.json").exists():
-        artifacts["traversability_json"] = "traversability.json"
-    if (scene_dir / "traversability.png").exists():
-        artifacts["traversability_png"] = "traversability.png"
+    # Stage 4: capture map — top-down density of captured scene.
+    if (scene_dir / "capture_map.json").exists():
+        artifacts["capture_map_json"] = "capture_map.json"
+    if (scene_dir / "capture_map.png").exists():
+        artifacts["capture_map_png"] = "capture_map.png"
 
     if status == "complete":
         m["status"] = "ready"
@@ -159,14 +163,14 @@ def run(input_id: str, **kwargs) -> dict:
                       flush=True)
                 lifted_ckpt.unlink(missing_ok=True)
         if not lifted:
-            # Stage 1.5 — VLM scene scout (sync; uses its own asyncio.run).
+            # Stage 3.1 — VLM scene scout (sync; uses its own asyncio.run).
             scout_prompts = kwargs.get("text_prompts")
             use_scout = bool(kwargs.get("use_scout", True))
             if scout_prompts is None and use_scout:
                 from .scene_scout import discover_scene_prompts
 
                 t_scout = time.time()
-                print("[stage:segmentation] === Stage 1.5: VLM scene scout ===", flush=True)
+                print("[stage:segmentation] === Stage 3.1: VLM scene scout ===", flush=True)
                 try:
                     scout_prompts = discover_scene_prompts(
                         frames_dir=scene_dir / "frames",
@@ -179,11 +183,11 @@ def run(input_id: str, **kwargs) -> dict:
                     scout_prompts = None
                 print(f"[stage:segmentation] scout done in {time.time()-t_scout:.1f}s", flush=True)
 
-            # Stage 2 — Grounding DINO + IoU tracklet linking.
+            # Stage 3.2 — Grounding DINO detection + 3.3 ReID + 3.4 IoU tracklet linking.
             from .gdino import run_gdino
 
             t_gdino = time.time()
-            print("[stage:segmentation] === Stage 2: GDINO detect + IoU-link ===", flush=True)
+            print("[stage:segmentation] === Stage 3.2-3.4: GDINO detect + ReID + IoU-link ===", flush=True)
             gdino_tracks = run_gdino(
                 frames_dir=scene_dir / "frames",
                 out_dir=scene_dir,
@@ -195,11 +199,11 @@ def run(input_id: str, **kwargs) -> dict:
             print(f"[stage:segmentation] GDINO done in {time.time()-t_gdino:.1f}s — "
                   f"{len(gdino_tracks)} tracks", flush=True)
 
-            # Stage 3 — bbox-depth lifting.
+            # Stage 3.5 — bbox-depth lifting.
             from .lift import run_lifting
 
             t_lift = time.time()
-            print(f"[stage:segmentation] === Stage 3: 3D lifting on {len(gdino_tracks)} tracks ===", flush=True)
+            print(f"[stage:segmentation] === Stage 3.5: 3D lifting on {len(gdino_tracks)} tracks ===", flush=True)
             lifted = run_lifting(gdino_tracks, scene_dir)
             print(f"[stage:segmentation] lifting done in {time.time()-t_lift:.1f}s — "
                   f"{len(lifted)} lifted tracks", flush=True)
@@ -217,13 +221,13 @@ def run(input_id: str, **kwargs) -> dict:
                       f"so the next run re-runs detection instead of resuming nothing",
                       flush=True)
 
-        # Stage 4 — labeling lanes.
+        # Stage 3.6 — Lane B labeling.
         lane_b_anns: list[dict] = []
         if "b" in lanes:
             from .lane_b import run_lane_b
 
             t_b = time.time()
-            print(f"[stage:segmentation] === Stage 4B: VLM labels on {len(lifted)} tracks ===", flush=True)
+            print(f"[stage:segmentation] === Stage 3.6: Lane B VLM labels on {len(lifted)} tracks ===", flush=True)
             # Lane B is the only lane that needs the asyncio loop (it fans
             # out 16-way under asyncio.gather). Scout + Lane C use sync
             # wrappers internally, so we keep them on the main thread.
@@ -234,7 +238,7 @@ def run(input_id: str, **kwargs) -> dict:
             lane_b_anns = []
             print("[stage:segmentation] Lane B skipped", flush=True)
 
-        # Stage 4C — whole-scene coherence review (one Gemini call).
+        # Stage 3.7 — Lane C whole-scene coherence review (one Gemini call).
         # Idempotent: if annotations.c.json already exists this returns
         # instantly without invoking the VLM, so a downstream failure
         # never re-pays the call cost.
@@ -243,33 +247,33 @@ def run(input_id: str, **kwargs) -> dict:
             from .lane_c import run_lane_c
 
             t_c = time.time()
-            print(f"[stage:segmentation] === Stage 4C: whole-scene coherence on "
+            print(f"[stage:segmentation] === Stage 3.7: Lane C whole-scene coherence on "
                   f"{len(lane_b_anns)} annotations ===", flush=True)
             lane_c_anns = run_lane_c(lane_b_anns, scene_dir, vlm_model=vlm_model)
             print(f"[stage:segmentation] Lane C done in {time.time()-t_c:.1f}s — "
                   f"{len(lane_c_anns)} annotations", flush=True)
 
-        # Stage 5 — free-space / traversability grid (humanoid navigation layer).
-        # Pure CPU on points.ply + cameras.json; the entire stage is decoupled
-        # from the VLM lanes so a failure here never invalidates the labels.
+        # Stage 4 — capture map (top-down density of captured scene).
+        # Pure CPU on points.ply + cameras.json; decoupled from the VLM
+        # lanes so a failure here never invalidates the labels.
         try:
-            from spatiality.nav.freespace import compute_freespace
+            from spatiality.nav.capture_map import compute_capture_map
 
             t_nav = time.time()
-            print("[stage:segmentation] === Stage 5: free-space / traversability ===", flush=True)
-            nav_summary = compute_freespace(scene_dir)
+            print("[stage:segmentation] === Stage 4: capture map ===", flush=True)
+            nav_summary = compute_capture_map(scene_dir)
             print(
-                f"[stage:segmentation] traversability done in {time.time()-t_nav:.1f}s — "
-                f"{nav_summary['stats']['traversable_m2']:.2f} m² traversable, "
-                f"{nav_summary['stats']['obstacle_m2']:.2f} m² obstacles, "
+                f"[stage:segmentation] capture map done in {time.time()-t_nav:.1f}s — "
+                f"{nav_summary['stats']['coverage_m2']:.2f} m² covered, "
+                f"{nav_summary['stats']['n_frames']} frames, "
                 f"grid {nav_summary['shape']} @ {nav_summary['cell_size_m']*100:.0f} cm",
                 flush=True,
             )
         except Exception as e:  # noqa: BLE001
-            # Non-fatal — labels are the primary product; nav grid is a bonus.
+            # Non-fatal — labels are the primary product; capture map is a bonus.
             print(
-                f"[stage:segmentation] traversability FAILED ({type(e).__name__}: {e}) — "
-                f"continuing without nav grid",
+                f"[stage:segmentation] capture map FAILED ({type(e).__name__}: {e}) — "
+                f"continuing without capture map",
                 flush=True,
             )
 

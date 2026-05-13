@@ -10,36 +10,46 @@ A walkthrough of how a phone video becomes a labelled 3D scene.
 phone video (.mp4 / .mov)
    │
    ▼
-[ 1 ] capture        ─ ffmpeg even-cadence frame extract        (local CPU)
+[ 1   ] capture       ─ ffmpeg even-cadence frame extract       (local CPU)
    │
    ▼
-[ 2 ] poses          ─ FlashVGGT  → depth + camera + 3D points  (Modal A100-80GB)
-   │                   • blur filter     → depth, depth_conf
-   │                   • single forward  → cameras.json, points.ply
-   │                                     → world_points (per-pixel XYZ)
+[ 2   ] poses         ─ FlashVGGT  → depth + camera + 3D points (Modal A100-80GB)
+   │                    • blur filter     → depth, depth_conf
+   │                    • single forward  → cameras.json, points.ply
+   │                                      → world_points (per-pixel XYZ)
    ▼
-[ 3 ] scene scout    ─ Gemini 2.5 Flash, 20 parallel calls      (Modal A100-40GB)
-   │                   • watches 6 frames per temporal slice
-   │                   • returns a per-slice noun-phrase list   (scout_prompts.json)
+[ 3   ] segmentation                                            (Modal A100-40GB)
+   │
+   │  [ 3.1 ] scene scout   ─ Gemini 2.5 Flash, 20 parallel calls
+   │           • watches 6 frames per temporal slice
+   │           • returns a per-slice noun-phrase list  (scout_prompts.json)
+   │
+   │  [ 3.2 ] detection     ─ Grounding DINO (open-vocab)
+   │           • single multi-phrase query, all frames
+   │           • scope filter → cross-phrase NMS
+   │
+   │  [ 3.3 ] re-ID         ─ DINOv2 appearance embeddings
+   │  [ 3.4 ] linking       ─ IoU + appearance tracklet linking  (tracks.json)
+   │
+   │  [ 3.5 ] 3D lift       ─ SAM 2.1 mask + bbox-depth unprojection
+   │           • multi-view consistency filter
+   │           • DBSCAN coherence + reproj sanity
+   │           • PCA OBB merge                       (_lifted_tracks_v2.pkl)
+   │
+   │  [ 3.6 ] Lane B labels ─ 6 orbital + 3 anchor crops → Gemini
+   │           • 16-way concurrent, per-track flush
+   │           • postprocess clean & dedupe         (annotations.b.json)
+   │
+   │  [ 3.7 ] Lane C review ─ top-down render + JSON inventory → Gemini
+   │           • drops, merges, relabels, relations (annotations.c.json)
    ▼
-[ 4 ] detection      ─ Grounding DINO (open-vocab)              (Modal A100-40GB)
-   │                   • single multi-phrase query, all frames
-   │                   • scope filter → cross-phrase NMS
-   │                   • DINOv2 re-ID-aware IoU linking         (tracks.json)
+[ 4   ] capture map   ─ top-down 2D footprint of captured surfaces (Modal CPU)
+                        • density heatmap of above-floor points
+                        • tight bbox via 5th-percentile threshold
+                        • non-fatal: labels ship even if this fails
+                                                    (capture_map.json/.png)
+   │
    ▼
-[ 5 ] 3D lift        ─ SAM 2.1 mask + bbox-depth unprojection   (Modal A100-40GB)
-   │                   • multi-view consistency filter
-   │                   • DBSCAN coherence + reproj sanity
-   │                   • PCA OBB merge                          (_lifted_tracks_v2.pkl)
-   ▼
-[ 6 ] Lane B labels  ─ 6 orbital + 3 anchor crops → Gemini      (Modal CPU side)
-   │                   • 16-way concurrent, per-track flush
-   │                   • postprocess clean & dedupe             (annotations.b.json)
-   ▼
-[ 7 ] Lane C review  ─ top-down render + JSON inventory → Gemini
-                       • drops, merges, relabels, relations     (annotations.c.json)
-                       │
-                       ▼
                    3D viewer in the web UI
 ```
 
@@ -64,7 +74,7 @@ backend/
       flashvggt.py             FlashVGGT / VGGT wrapper
       frame_select.py          blur filter
     segmentation/
-      run.py                   Stage 3+ orchestrator
+      run.py                   Stage 3 orchestrator (also triggers Stage 4)
       scene_scout.py           VLM scene scout
       gdino.py                 Grounding DINO + IoU linker
       reid.py                  DINOv2 appearance embeddings
@@ -75,6 +85,8 @@ backend/
       postprocess.py           class-conditional dedupe + size sanity
       render.py                point-cloud orbital / top-down rasteriser
       vlm.py                   Gemini wrapper (PydanticAI)
+    nav/
+      capture_map.py           Stage 4: top-down density map of captured scene
 
 backend/modal/inference.py     Modal app: spatiality-inference
 backend/modal/segmentation.py  Modal app: spatiality-segmentation
@@ -541,33 +553,31 @@ The stage is **idempotent**: if `annotations.c.json` already exists, it's return
 
 &nbsp;
 
-## 4½. Stage 5: Free-space / traversability map (Modal CPU)
+## 5. Stage 4: Capture map (Modal CPU)
 
-Stage 5 turns "a labelled 3D scene" into "something a locomotion planner can consume." It runs at the end of segmentation on CPU (numpy + Pillow only), uses no models, and is non-fatal — if it raises, Lanes B/C labels still ship as the primary product.
+Stage 4 emits a top-down 2D map of the captured space — a density heatmap of above-floor surfaces showing what was observed and how much of the room was covered. It runs at the end of segmentation on CPU (numpy + Pillow), uses no models, and is non-fatal — if it raises, Lanes B/C labels still ship as the primary product.
+
+This used to be a humanoid free-space / traversability layer. We dropped that framing because handheld captures rarely contain enough floor pixels to support "where can a robot stand?" — the previous algorithm was returning 0 m² traversable on every desk-centric scene. The capture map is the artefact every run can produce meaningfully.
 
 **Inputs:** `points.ply`, `cameras.json`.
 
-**What it does** (`backend/src/spatiality/nav/freespace.py`):
+**What it does** (`backend/src/spatiality/nav/capture_map.py`):
 
 1. **Recover scene up.** Each camera's image-y axis (`[0, -1, 0]` in camera space) is mapped through `Rᵀ` into world coordinates. Averaging across all cameras gives a stable gravity estimate — more robust than either "−y in world" (only true if frame 0 is level) or PCA of the cloud (gets confused by tall obstacles).
 2. **Pick an in-plane basis.** Two orthonormal axes `(u, v)` perpendicular to `up` so the grid's rows/cols are aligned with the captured space's natural orientation.
 3. **Estimate the floor.** Project every point onto `up`, then take the densest 5 cm band near the 2nd-percentile height. Single-point outliers under the floor don't move the estimate.
-4. **Slice into robot-body bands.** Heights above the floor are bucketed as `ankle 0.05–0.20 m`, `knee 0.20–0.60 m`, `hip 0.60–1.20 m`, `head 1.20–1.80 m`. Tuned for a generic ~1.7 m humanoid.
-5. **Rasterise.** XY footprint at 5 cm cells (≈ the underlying depth-map resolution for indoor captures). Per cell, count points in each band.
-6. **Classify each cell.**
-   - `traversable` = floor support in the ankle band AND no points in `[ankle, head]` after inflating obstacles by the robot's body radius (default 0.25 m, Minkowski-dilated).
-   - `obstacle` = any point in the ankle-to-head column.
-   - `unknown` = neither floor support nor obstacle (no info).
-7. **Tighten the grid** to the bounding box of any non-unknown cells + a 10-cell margin.
+4. **Drop the floor itself.** Points within 5 cm of the floor are removed — they're either the floor (uninteresting for "what's in the room") or under-floor noise. What remains is everything *standing on* the floor.
+5. **Rasterise above-floor density.** XY footprint at 5 cm cells. Per cell, count above-floor points; log-bin to uint8 because the raw count distribution is heavy-tailed (a high-coverage shelf can have 100× the points of a typical cell) and a linear ramp washes everything else into the background.
+6. **Tighten the grid** via a 5th-percentile density threshold + 3-cell breathing-room margin. The percentile filter drops long-tail single-point cells at the periphery that would otherwise drag the displayed extent out by 30-40%.
 
 **Outputs:**
 
-- `traversability.json` — `{cell_size_m, grid_shape, origin_uv_m, floor_height_world, up_axis_world, u_axis_world, v_axis_world, camera_center_uv_m, robot_radius_m, bands_m, stats: {traversable_m2, obstacle_m2, …}, cells_b64: base64(uint8 grid)}`. Cell labels are stable integers (`0=unknown, 1=traversable, 2=obstacle`) so the frontend can render a 3D plane overlay later without re-reading the spec.
-- `traversability.png` — top-down preview with green/coral cells + the camera-track polyline overlaid. This is what the viewer's "Free space" toggle surfaces today.
+- `capture_map.json` — `{cell_size_m, grid_shape, tight_extent_m, origin_uv_m, floor_height_world, up_axis_world, u_axis_world, v_axis_world, camera_center_uv_m, stats: {coverage_m2, coverage_cells, n_frames}, density_b64: base64(uint8 grid)}`. The basis vectors are preserved verbatim from the previous schema so the viewer's leveling code keeps working — gravity-aligned cloud, floor at Y=0.
+- `capture_map.png` — top-down preview: amber density heatmap (sparse → bright as cells get denser). This is what the viewer's "Capture map" toggle surfaces.
 
-**Why CPU and why now**: depth maps + points already encode all the geometry needed; the only computer-visiony step (floor extraction) is robust statistics. Wall-clock is ~5–15 s on a 50 M-point cloud; cost is zero (no API calls). It's wired into `segmentation.run` after Lane C so it never blocks the labels' completion.
+**Why CPU and why now**: the points + camera poses already encode all the geometry; the only computer-visiony step (floor extraction) is robust statistics. Wall-clock is ~5–15 s on a 50 M-point cloud; cost is zero (no API calls). Wired into `segmentation.run` after Lane C so it never blocks labels' completion.
 
-The frontend reads `manifest.artifacts.traversability_png` / `traversability_json`; absence means the stage didn't run (e.g. older scenes) and the viewer falls back to "Stage 5 hasn't run" copy in the Free-space card.
+The frontend reads `manifest.artifacts.capture_map_png` / `capture_map_json`; absence means the stage didn't run (e.g. older scenes) and the viewer falls back to "Stage 4 hasn't run" copy in the Capture-map card.
 
 &nbsp;
 
@@ -575,7 +585,7 @@ The frontend reads `manifest.artifacts.traversability_png` / `traversability_jso
 
 &nbsp;
 
-## 5. Coordinate conventions
+## 6. Coordinate conventions
 
 We standardise on **OpenCV camera convention** end-to-end:
 
@@ -591,7 +601,7 @@ The web `SplatViewer` knows this and negates `y/z` while parsing, do not pre-fli
 
 &nbsp;
 
-## 6. Manifest, status, and the FastAPI frontend contract
+## 7. Manifest, status, and the FastAPI frontend contract
 
 `backend/data/outputs/<scene_id>/manifest.json` is the single source of truth the Next.js client polls.
 
@@ -628,7 +638,7 @@ The web `SplatViewer` knows this and negates `y/z` while parsing, do not pre-fli
 
 &nbsp;
 
-## 7. On-disk artefact layout
+## 8. On-disk artefact layout
 
 ```
 backend/data/outputs/<scene_id>/
@@ -656,7 +666,7 @@ Anything starting with `_` is a checkpoint that gets cleaned up on a successful 
 
 &nbsp;
 
-## 8. Resumability summary
+## 9. Resumability summary
 
 | Stage | Checkpoint | What resume skips |
 |---|---|---|
@@ -675,7 +685,7 @@ Per-unit checkpoints (Lane B per track, lift per track) are crucial. Lane B's pr
 
 &nbsp;
 
-## 9. Failure handling
+## 10. Failure handling
 
 Every Modal call is wrapped in a try/except in `backend/main.py::_run_pipeline`. On any exception:
 
@@ -691,7 +701,7 @@ The frontend's poll sees `status: "failed"`, stops spinning, and shows the error
 
 &nbsp;
 
-## 10. Running the pipeline
+## 11. Running the pipeline
 
 Two execution paths. Path A is the supported one; Path B exists so anyone with their own CUDA box can skip Modal.
 
@@ -749,7 +759,7 @@ The local-GPU runner sets `SPATIALITY_DATA_ROOT=backend/data/inputs` and `SPATIA
 
 &nbsp;
 
-## 11. The model stack at a glance
+## 12. The model stack at a glance
 
 | Stage | Model | Where | Why |
 |---|---|---|---|

@@ -359,7 +359,7 @@ def discover_scene_prompts(
             s, e = p.frame_range
             print(f"[scout]   • '{p.phrase}' [{s}..{e}) ({e - s} frames)", flush=True)
 
-    # Persist for instant resume on retry. Keeps Stage 2/3 GPU iterations
+    # Persist for instant resume on retry. Keeps Stage 3.2/3.5 GPU iterations
     # cheap if a downstream stage fails — scout never gets re-run.
     try:
         ckpt.write_text(json.dumps(_serialise(scoped), indent=2))

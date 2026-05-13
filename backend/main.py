@@ -193,10 +193,10 @@ def _push_inputs_to_modal(scene_id: str) -> None:
 #
 #   frames/                — replaced by per-(track, frame) evidence crops
 #                            under evidence/<id>/<frame>.jpg
-#   depth/, depth_conf/    — VGGT depth maps; only used by Stage 3 lift
+#   depth/, depth_conf/    — VGGT depth maps; only used by Stage 3.5 lift
 #   world_points*/         — VGGT point-head outputs; same
-#   _forward_preds.pt      — Stage 1 crash-safety checkpoint
-#   _lifted_tracks_v2.pkl  — Stage 2/3 crash-safety checkpoint
+#   _forward_preds.pt      — Stage 2 crash-safety checkpoint
+#   _lifted_tracks_v2.pkl  — Stage 3.2/3.5 crash-safety checkpoint
 _PULL_SKIP_PREFIXES: tuple[str, ...] = (
     "frames/",
     "depth/",
@@ -358,7 +358,19 @@ def _run_pipeline(scene_id: str, n_frames: int, infer_kwargs: dict | None = None
 
     try:
         _bump_manifest(scene_id, "poses", "running")
-        _extract_frames(scene_id, n_frames)
+        extract_info = _extract_frames(scene_id, n_frames)
+        # Surface the post-ffmpeg (pre-blur-filter) frame count on the capture
+        # stage so the frontend's "frames" cell can display extracted/used as
+        # a real ratio. Without this `manifest.stats.frame_count` stays 0 for
+        # demo scenes and the UI shows "720 / 0".
+        mpath = _scene_output_dir(scene_id) / "manifest.json"
+        if mpath.exists():
+            mm = json.loads(mpath.read_text())
+            cap = mm.setdefault("stages", {}).setdefault("capture", {})
+            cap["frame_count"] = int(extract_info["frame_count"])
+            cap.setdefault("status", "complete")
+            mm.setdefault("stats", {})["frame_count"] = int(extract_info["frame_count"])
+            mpath.write_text(json.dumps(mm, indent=2))
         _push_inputs_to_modal(scene_id)
     except BaseException as exc:
         _bump_manifest(

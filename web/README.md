@@ -8,7 +8,7 @@ Next.js 16 (App Router) + React 18 + TypeScript strict + Three.js + Tailwind.
 - **AnnotationOverlay** — HTML billboard pins anchored to each annotation centroid; tap to select, double-tap to isolate.
 - **PipelineProgress / PipelineOverview** — auto-poll `manifest.json` every 2 s until the splat stage completes, then render the cloud; segmentation continues in the background.
 - **SidePanel** — Pipeline / Objects / Evidence drawers, plus a chat input wired to `/api/agent/chat`.
-- **FreespaceCard** — toggles the Stage 5 traversability grid overlay at floor height.
+- **CaptureMapCard** — top-left overlay showing the Stage 4 capture map (top-down density of above-floor surfaces).
 
 ## Routes
 

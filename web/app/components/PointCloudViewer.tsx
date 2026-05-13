@@ -14,7 +14,7 @@
  * buffer with no blending.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 // Named imports (instead of `import * as THREE`) so Turbopack tree-shakes
 // three.js properly — bundler memory during /scenes/[id] compile drops
 // dramatically (the namespace import was forcing every three module to be
@@ -31,6 +31,8 @@ import {
   GridHelper,
   LineBasicMaterial,
   LineSegments,
+  Matrix3,
+  Matrix4,
   PerspectiveCamera,
   Points,
   Raycaster,
@@ -41,7 +43,8 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
-import type { Annotation } from "@/lib/types";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { Annotation, BBox, Vec3 } from "@/lib/types";
 import { useUI } from "@/store/ui";
 import { AnnotationOverlay } from "./AnnotationOverlay";
 
@@ -170,11 +173,150 @@ type DebugState = {
 interface Props {
   pointsUrl: string;
   annotations: Annotation[];
+  /** Per-frame camera centers (cameras.json) in viewer frame — already
+   *  through the OpenCV→three.js (x,-y,-z) flip. When present, the initial
+   *  camera spawns at the median of these (≈ where the user stood) rather
+   *  than at an arbitrary offset from the annotation centroid. */
+  cameraCenters?: Vec3[];
   /** Set true when points.ply is empty/0-vertex; we'll show a placeholder. */
   emptyCloud?: boolean;
+  /** URL to capture_map.json (Stage 4 output). When present, the viewer
+   *  uses its `up_axis_world` / `u_axis_world` / `v_axis_world` /
+   *  `floor_height_world` fields to rotate the cloud so gravity aligns with
+   *  +Y and the floor sits at Y=0. Missing or 404 → no re-orientation. */
+  captureMapUrl?: string;
 }
 
-export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) {
+/** Subset of capture_map.json fields the viewer reads. The backend writes
+ *  these in OpenCV world coords (+Y down, +Z forward, first-camera origin). */
+interface CaptureMapMeta {
+  up_axis_world: [number, number, number];
+  u_axis_world: [number, number, number];
+  v_axis_world: [number, number, number];
+  floor_height_world: number;
+}
+
+/** Build the 4×4 viewer-frame transform that levels the cloud:
+ *  rotate so the Stage-4 gravity vector aligns with +Y, then translate so
+ *  the estimated floor height lands at Y=0.
+ *
+ *  The basis vectors in `meta` are in OpenCV world coords; the cloud and
+ *  annotations both receive the (x, -y, -z) flip when entering viewer
+ *  space, so we apply the same flip to the basis vectors here. Dot
+ *  products are preserved by that flip, so `floor_height_world` (a scalar)
+ *  doesn't need re-projection. */
+function buildLevelMatrix(meta: CaptureMapMeta): Matrix4 {
+  const up = new Vector3(meta.up_axis_world[0], -meta.up_axis_world[1], -meta.up_axis_world[2]).normalize();
+  const u = new Vector3(meta.u_axis_world[0], -meta.u_axis_world[1], -meta.u_axis_world[2]).normalize();
+  // Re-orthonormalize u against up to absorb any float drift in the stored
+  // basis, then derive v = u × up so (u, up, v) is a RIGHT-handed basis.
+  // The backend's v_axis_world is computed as up × u (see capture_map.py)
+  // which yields a left-handed triple — taking it verbatim makes the basis
+  // matrix a reflection (det = -1), and the result is a mirrored scene
+  // (left/right swap). Recomputing v with the correct sign avoids that.
+  const uOrtho = u.clone().addScaledVector(up, -u.dot(up)).normalize();
+  const vOrtho = new Vector3().crossVectors(uOrtho, up).normalize();
+  // makeBasis sets columns. The matrix [u | up | v] maps floor-frame axes
+  // into viewer coords; we want the inverse (viewer → floor) = transpose
+  // for an orthonormal basis.
+  const basis = new Matrix4().makeBasis(uOrtho, up, vOrtho);
+  basis.invert();
+  const translate = new Matrix4().makeTranslation(0, -meta.floor_height_world, 0);
+  return new Matrix4().multiplyMatrices(translate, basis);
+}
+
+/** Refine a base level matrix by fitting a plane to the lowest slice of the
+ *  parsed cloud and applying a small correction rotation so the plane
+ *  normal aligns with +Y exactly.
+ *
+ *  Why: the backend's gravity estimate is the (trimmed) mean of per-frame
+ *  camera-up vectors. On handheld captures it's typically within a few
+ *  degrees of true gravity, but those few degrees are visible when you
+ *  orbit the scene. The cloud itself contains a strong horizontal signal
+ *  (the floor); fitting a plane to its bottom slice cancels the residual.
+ *
+ *  Returns the composed matrix, or the input unchanged if the refinement
+ *  would have been too small to matter, too large to trust (often means
+ *  the bottom slice isn't actually the floor — slanted scenes, mostly-air
+ *  reconstructions), or numerically ill-conditioned. */
+function refineLevelMatrix(positions: Float32Array, count: number, base: Matrix4): Matrix4 {
+  const stride = Math.max(1, Math.floor(count / 12000));
+  const tmp = new Vector3();
+  // Pass 1: find the Y range so we can pick a "floor band" relative to it.
+  let minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < count; i += stride) {
+    tmp.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]).applyMatrix4(base);
+    if (tmp.y < minY) minY = tmp.y;
+    if (tmp.y > maxY) maxY = tmp.y;
+  }
+  const range = maxY - minY;
+  if (range < 0.2) return base; // tiny vertical extent → not enough signal
+  const yCutoff = minY + range * 0.15;
+  // Pass 2: accumulate normal-equation moments for the floor candidates.
+  let n = 0;
+  let sxx = 0, sxz = 0, sx = 0, szz = 0, sz = 0, sxy = 0, szy = 0, sy = 0;
+  for (let i = 0; i < count; i += stride) {
+    tmp.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]).applyMatrix4(base);
+    if (tmp.y > yCutoff) continue;
+    const x = tmp.x, y = tmp.y, z = tmp.z;
+    sxx += x * x; sxz += x * z; sx += x;
+    szz += z * z; sz += z;
+    sxy += x * y; szy += z * y; sy += y;
+    n++;
+  }
+  if (n < 200) return base;
+  // Solve A · [a; b; c] = rhs with A symmetric 3×3 and rhs = [sxy; szy; sy].
+  // Coefficients (a, b) of  Y = a·X + b·Z + c  describe the floor's tilt.
+  const A = new Matrix3().set(sxx, sxz, sx, sxz, szz, sz, sx, sz, n);
+  if (Math.abs(A.determinant()) < 1e-6) return base;
+  const Ainv = A.clone().invert();
+  const e = Ainv.elements; // column-major
+  const a = e[0] * sxy + e[3] * szy + e[6] * sy;
+  const b = e[1] * sxy + e[4] * szy + e[7] * sy;
+  // Floor plane normal in current leveled frame.
+  const normal = new Vector3(-a, 1, -b).normalize();
+  const dot = Math.max(-1, Math.min(1, normal.y));
+  const angle = Math.acos(dot);
+  if (angle < 0.003) return base; // ~0.17°: already aligned, skip
+  if (angle > 0.18) return base; // >10°: suspicious — likely not the floor
+  const axis = new Vector3().crossVectors(normal, new Vector3(0, 1, 0));
+  if (axis.lengthSq() < 1e-10) return base;
+  axis.normalize();
+  const correction = new Matrix4().makeRotationAxis(axis, angle);
+  return new Matrix4().multiplyMatrices(correction, base);
+}
+
+/** Apply a 4×4 matrix to a 3-vector annotation field. */
+function applyMatrixToVec3(M: Matrix4, p: Vec3): Vec3 {
+  const v = new Vector3(p[0], p[1], p[2]).applyMatrix4(M);
+  return [v.x, v.y, v.z];
+}
+
+/** Apply a 4×4 matrix to an axis-aligned bbox. After rotation the original
+ *  corners no longer form an AABB; re-derive a tight AABB by transforming
+ *  all 8 corners. */
+function applyMatrixToBBox(M: Matrix4, b: BBox): BBox {
+  const [lo, hi] = b;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const v = new Vector3();
+  for (let i = 0; i < 8; i++) {
+    v.set(
+      i & 1 ? hi[0] : lo[0],
+      i & 2 ? hi[1] : lo[1],
+      i & 4 ? hi[2] : lo[2],
+    ).applyMatrix4(M);
+    if (v.x < minX) minX = v.x;
+    if (v.y < minY) minY = v.y;
+    if (v.z < minZ) minZ = v.z;
+    if (v.x > maxX) maxX = v.x;
+    if (v.y > maxY) maxY = v.y;
+    if (v.z > maxZ) maxZ = v.z;
+  }
+  return [[minX, minY, minZ], [maxX, maxY, maxZ]];
+}
+
+export function PointCloudViewer({ pointsUrl, annotations, cameraCenters, emptyCloud, captureMapUrl }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<{
@@ -186,6 +328,65 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
   const selectedId = useUI((s) => s.selectedId);
   const renderMode = useUI((s) => s.renderMode);
   const showAnnotations = useUI((s) => s.showAnnotations);
+  // The matrix that levels the scene (set once per scene after we fetch
+  // capture_map.json; null when Stage 4 hasn't run yet). Drives both the
+  // per-vertex transform inside the PLY parser AND the annotation overlay
+  // through `transformedAnnotations` below. Wrapped in a wrapper object so
+  // identity changes trigger the useMemo even though Matrix4 itself is
+  // mutable — we never mutate after assigning.
+  const [levelMatrix, setLevelMatrix] = useState<Matrix4 | null>(null);
+  // Mirror into a ref so the heavy useEffect (which runs once per scene)
+  // can also pick the matrix up after the async fetch resolves.
+  const levelMatrixRef = useRef<Matrix4 | null>(null);
+  useEffect(() => {
+    levelMatrixRef.current = levelMatrix;
+  }, [levelMatrix]);
+
+  // Fetch capture_map.json in its own effect so the viewer doesn't
+  // remount when Stage 4 finishes mid-session. When the matrix arrives, we
+  // also apply it to the already-loaded cloud (if any) via cloudRef so the
+  // re-orientation is immediate, no re-stream.
+  useEffect(() => {
+    if (!captureMapUrl) {
+      setLevelMatrix(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(captureMapUrl);
+        if (!res.ok) return;
+        const meta = (await res.json()) as CaptureMapMeta;
+        if (cancelled) return;
+        if (
+          !Array.isArray(meta.up_axis_world) ||
+          !Array.isArray(meta.u_axis_world) ||
+          !Array.isArray(meta.v_axis_world) ||
+          typeof meta.floor_height_world !== "number"
+        ) {
+          return;
+        }
+        const M = buildLevelMatrix(meta);
+        setLevelMatrix(M);
+        const cloud = cloudRef.current;
+        if (cloud) {
+          cloud.matrix.copy(M);
+          cloud.matrixAutoUpdate = false;
+          markDirtyRef.current?.();
+        }
+        // Re-frame the camera onto the now-leveled scene. Defer one frame
+        // so transformedAnnotations (the useMemo result) has time to flush
+        // into annotationsRef.current — reset() reads from that ref to
+        // compute the new initialView.
+        requestAnimationFrame(() => apiRef.current?.reset());
+      } catch {
+        /* silent: missing capture map = render unleveled (no Stage 4) */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [captureMapUrl]);
   const [debug, setDebug] = useState<DebugState>({ status: "idle", log: [] });
   const debugRef = useRef(debug);
   debugRef.current = debug;
@@ -208,10 +409,53 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
   // in deps the viewer remounts on every 2s manifest poll, each in-flight
   // load rejects with "Scene disposed", and the dispose path stomps on DOM
   // nodes mid-load. Critical fix.
-  const annotationsRef = useRef<Annotation[]>(annotations);
+  // Annotations in viewer space (after the OpenCV→three.js flip applied in
+  // useScene.ts) further transformed by the Stage-4 level matrix when it's
+  // available, so they stay co-registered with the leveled cloud.
+  const transformedAnnotations = useMemo<Annotation[]>(() => {
+    if (!levelMatrix) return annotations;
+    return annotations.map((a) => ({
+      ...a,
+      centroid: applyMatrixToVec3(levelMatrix, a.centroid),
+      bbox: applyMatrixToBBox(levelMatrix, a.bbox),
+    }));
+  }, [annotations, levelMatrix]);
+
+  const annotationsRef = useRef<Annotation[]>(transformedAnnotations);
   useEffect(() => {
-    annotationsRef.current = annotations;
-  }, [annotations]);
+    annotationsRef.current = transformedAnnotations;
+  }, [transformedAnnotations]);
+
+  // Camera centers run through the same level matrix the cloud + annotations
+  // see, so `initialView` (which consumes them) gets viewer-frame leveled
+  // positions — otherwise the spawn would land under the floor on scenes
+  // where the floor isn't already at y=0.
+  const transformedCameraCenters = useMemo<Vec3[]>(() => {
+    if (!cameraCenters || cameraCenters.length === 0) return [];
+    if (!levelMatrix) return cameraCenters;
+    return cameraCenters.map((c) => applyMatrixToVec3(levelMatrix, c));
+  }, [cameraCenters, levelMatrix]);
+  const cameraCentersRef = useRef<Vec3[]>(transformedCameraCenters);
+  // Track whether we've ever seen non-empty centers. If they arrive *after*
+  // the viewer has already mounted (typical — useQuery resolves async), we
+  // want a single reset() so the spawn snaps from the legacy diagonal-offset
+  // fallback to the proper in-room median. Subsequent updates (e.g. level
+  // matrix arrival re-transforming them) don't re-fire — by then the user
+  // may have panned, and yanking the camera back would be jarring.
+  const cameraCentersResetFiredRef = useRef(false);
+  useEffect(() => {
+    cameraCentersRef.current = transformedCameraCenters;
+    if (
+      !cameraCentersResetFiredRef.current &&
+      transformedCameraCenters.length > 0 &&
+      apiRef.current
+    ) {
+      cameraCentersResetFiredRef.current = true;
+      // Defer one frame so any concurrent annotation/level updates flush
+      // into the refs that reset() reads.
+      requestAnimationFrame(() => apiRef.current?.reset());
+    }
+  }, [transformedCameraCenters]);
   const setCameraRef = useRef(setCamera);
   useEffect(() => {
     setCameraRef.current = setCamera;
@@ -222,10 +466,13 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
   }, [setCloudStats]);
 
   // Fly-to request: set externally (annotation click, preset button), the
-  // render loop interpolates `target` and `radius` toward it each frame.
+  // render loop interpolates `target` (OrbitControls pivot) and `position`
+  // (camera location) toward it each frame. Keeping both ends of the
+  // viewing ray independent lets us tween view changes (top/front/side) as
+  // well as pivot-only changes (annotation click) through one path.
   const flyToRef = useRef<{
     target: [number, number, number];
-    radius: number;
+    position: [number, number, number];
   } | null>(null);
 
   // Bridges from the component scope into the heavy useEffect. The effect
@@ -240,10 +487,12 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
   useEffect(() => { renderModeRef.current = renderMode; }, [renderMode]);
 
   // Imperative API the surrounding UI (zoom buttons, minimap) calls into.
+  type PresetView = "top" | "front" | "side" | "reset";
   type ViewerApi = {
     zoom: (factor: number) => void;
     setTarget: (xyz: [number, number, number], radius?: number) => void;
     reset: () => void;
+    preset: (view: PresetView) => void;
   };
   const apiRef = useRef<ViewerApi | null>(null);
 
@@ -265,33 +514,48 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
   }, [renderMode]);
 
 
+  // Tracks the previous selection so we can detect a "deselect" transition
+  // and explicitly release the orbit target — otherwise OrbitControls keeps
+  // pivoting around the last-clicked object even after the pill is dropped,
+  // which reads as the camera being "locked" to it.
+  const prevSelectedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!selectedId) return;
-    const a = annotationsRef.current.find((x) => x.id === selectedId);
-    if (!a) return;
-    const [lo, hi] = a.bbox;
-    const ext = Math.max(
-      hi[0] - lo[0],
-      hi[1] - lo[1],
-      hi[2] - lo[2],
-    );
-    flyToRef.current = {
-      target: a.centroid as [number, number, number],
-      // Pull camera in proportional to the object's extent — small things =
-      // close-up, big things = farther back. Multiplier kept under 1 so the
-      // camera lands inside/at the surface of the bbox; the previous 2.2×
-      // floated too far out to inspect interiors.
-      radius: Math.max(0.06, ext * 0.85),
-    };
+    if (selectedId) {
+      const a = annotationsRef.current.find((x) => x.id === selectedId);
+      if (a) {
+        const [lo, hi] = a.bbox;
+        const ext = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+        // Pull camera in proportional to the object's extent — small things =
+        // close-up, big things = farther back. apiRef.setTarget preserves the
+        // current viewing direction at the requested distance.
+        apiRef.current?.setTarget(a.centroid as [number, number, number], Math.max(0.06, ext * 0.85));
+      }
+    } else if (prevSelectedRef.current) {
+      // Deselect: shift the orbit pivot back to the scene's bounding-sphere
+      // center, keeping the same view angle + distance. Without this the
+      // camera keeps spinning around the previously-selected object.
+      const cloud = cloudRef.current;
+      const sphere = cloud?.geometry?.boundingSphere ?? null;
+      if (sphere) {
+        const c = new Vector3().copy(sphere.center).applyMatrix4(cloud!.matrix);
+        apiRef.current?.setTarget([c.x, c.y, c.z]);
+      } else {
+        apiRef.current?.reset();
+      }
+    }
+    prevSelectedRef.current = selectedId;
   }, [selectedId]);
 
   useEffect(() => {
     if (!containerRef.current) return;
     let disposed = false;
 
-    // Snapshot annotations once for initial camera framing. Live updates after
-    // mount go through AnnotationOverlay (it re-renders on prop change).
-    const initial = initialView(annotationsRef.current);
+    // Recomputed at mount and on every reset(), so when the level matrix
+    // arrives mid-session and the annotations transform under it, the next
+    // reset frames the leveled scene rather than the pre-level snapshot.
+    const computeInitial = () =>
+      initialView(annotationsRef.current, cameraCentersRef.current);
+    let initial = computeInitial();
 
     const useViewer = !emptyCloud;
     let raf = 0;
@@ -345,86 +609,32 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
       // Light scene scaffolding so the cloud has spatial context.
       scene.add(new GridHelper(8, 16, 0x3a3a46, 0x1a1a20));
 
-      // Camera controls:
-      //   left-drag   → orbit around `target` (theta/phi)
-      //   right-drag  → pan `target` in screen space (move into the cloud)
-      //   shift+drag  → also pan (for trackpad users without right-button)
-      //   wheel       → dolly (radius); preventDefault on passive:false so the
-      //                  browser doesn't scroll the page while you zoom
-      //   keys WASD   → pan target horizontally; QE → pan vertically
-      const target = new Vector3(...initial.lookAt);
-      const sph = new Spherical();
-      sph.setFromVector3(camera.position.clone().sub(target));
-      let dragging: "orbit" | "pan" | null = null;
-      let lastX = 0;
-      let lastY = 0;
-      const onDown = (e: PointerEvent) => {
-        dragging =
-          e.button === 2 || e.shiftKey || e.metaKey || e.ctrlKey
-            ? "pan"
-            : "orbit";
-        lastX = e.clientX;
-        lastY = e.clientY;
-        (e.target as Element)?.setPointerCapture?.(e.pointerId);
-      };
-      const onMove = (e: PointerEvent) => {
-        if (!dragging) return;
-        const dx = e.clientX - lastX;
-        const dy = e.clientY - lastY;
-        lastX = e.clientX;
-        lastY = e.clientY;
-        if (dragging === "orbit") {
-          sph.theta -= dx * 0.005;
-          sph.phi = Math.max(0.05, Math.min(Math.PI - 0.05, sph.phi - dy * 0.005));
-        } else {
-          // Pan in camera-screen space scaled by radius so it feels
-          // proportional at any zoom level.
-          const right = new Vector3();
-          const up = new Vector3();
-          camera.matrixWorld.extractBasis(right, up, new Vector3());
-          const k = sph.radius * 0.0015;
-          target.addScaledVector(right, -dx * k);
-          target.addScaledVector(up, dy * k);
-        }
-      };
-      const onUp = () => {
-        dragging = null;
-      };
-      const onWheel = (e: WheelEvent) => {
-        e.preventDefault();
-        const factor = Math.exp(e.deltaY * 0.0015);
-        sph.radius = Math.max(0.05, Math.min(40, sph.radius * factor));
-      };
-      const onContextMenu = (e: MouseEvent) => e.preventDefault();
-      // Double-click to recenter the orbit target on the picked point. We
-      // raycast against the streaming Points cloud; the threshold is tuned
-      // generously vs. the rendered point size so picking works even when
-      // the cursor lands between sparse pixels.
-      const raycaster = new Raycaster();
-      const ndc = new Vector2();
-      raycaster.params.Points = { threshold: 0.02 };
-      const onDoubleClick = (e: MouseEvent) => {
-        const cloud = cloudRef.current;
-        if (!cloud) return;
-        const rect = dom.getBoundingClientRect();
-        ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-        raycaster.setFromCamera(ndc, camera);
-        // Scale the picking threshold with the current orbit radius so the
-        // user gets a similar hit-area whether zoomed in or out.
-        raycaster.params.Points!.threshold = Math.max(0.005, sph.radius * 0.01);
-        const hits = raycaster.intersectObject(cloud, false);
-        if (hits.length === 0) return;
-        const p = hits[0].point;
-        flyToRef.current = {
-          target: [p.x, p.y, p.z],
-          // Preserve current zoom — only the pivot moves.
-          radius: sph.radius,
-        };
-      };
-      // True when focus is in a text field — chat input, modal, etc. WASD
-      // and friends would otherwise scroll the camera every time the user
-      // typed an "a" or "s".
+      // Three.js's built-in OrbitControls — battle-tested, supports touch &
+      // pinch gestures out of the box, and adds two consumer-grade niceties
+      // that the previous hand-rolled spherical code lacked:
+      //   • enableDamping: drag/scroll inputs ease in/out instead of snapping
+      //   • zoomToCursor:  wheel zoom moves toward the cursor, not the orbit
+      //     pivot — feels right when inspecting a particular shelf or wall
+      // Pan defaults to screen-space (translation along the camera plane),
+      // which keeps everything intuitive after the Stage-4 levelling makes
+      // "up" actually point up in world space.
+      const dom = renderer.domElement;
+      const controls = new OrbitControls(camera, dom);
+      controls.target.set(...initial.lookAt);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.zoomToCursor = true;
+      controls.screenSpacePanning = true;
+      controls.minDistance = 0.3;
+      controls.maxDistance = 40;
+      // Block flipping below the floor: after levelling, +Y is gravity-up
+      // and the floor sits at Y=0, so we cap the polar angle just shy of
+      // the equator (looking horizontally out from the ground).
+      controls.maxPolarAngle = Math.PI - 0.05;
+      controls.update();
+
+      // True when focus is in a text field — chat input, modal, etc. The
+      // R-reset key would otherwise fire while the user typed in an input.
       const isTypingTarget = (e: KeyboardEvent): boolean => {
         const t = e.target as HTMLElement | null;
         if (!t) return false;
@@ -432,87 +642,186 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
         const tag = t.tagName;
         return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
       };
-      const onKey = (e: KeyboardEvent) => {
-        if (isTypingTarget(e)) return;
-        const k = sph.radius * 0.04;
-        const right = new Vector3();
-        const up = new Vector3();
-        const fwd = new Vector3();
-        camera.matrixWorld.extractBasis(right, up, fwd);
-        fwd.negate();
-        switch (e.key.toLowerCase()) {
-          case "w": target.addScaledVector(fwd, k); break;
-          case "s": target.addScaledVector(fwd, -k); break;
-          case "a": target.addScaledVector(right, -k); break;
-          case "d": target.addScaledVector(right, k); break;
-          case "q": target.addScaledVector(up, -k); break;
-          case "e": target.addScaledVector(up, k); break;
-          case "r":
-            target.set(...initial.lookAt);
-            sph.setFromVector3(
-              new Vector3(...initial.position).sub(target),
-            );
-            break;
-          default: return;
-        }
-      };
-      // Render-on-demand: only redraw when something changed. Each input
-      // event flips `dirty` true; the tick clears it after rendering. Idle
-      // GPU usage drops to zero when nothing is moving.
+
+      // Render-on-demand: redraw whenever OrbitControls reports a change
+      // (drag/wheel/pinch). Idle GPU usage stays at zero.
       let dirty = true;
       const markDirty = () => {
         dirty = true;
       };
-      // Expose markDirty to sibling effects (mode toggles etc.) so they can
-      // schedule a redraw without owning the render loop.
       markDirtyRef.current = markDirty;
       cleanup.push(() => {
         if (markDirtyRef.current === markDirty) markDirtyRef.current = null;
       });
+      controls.addEventListener("change", markDirty);
+      controls.addEventListener("start", markDirty);
+      controls.addEventListener("end", markDirty);
 
-      const dom = renderer.domElement;
-      dom.addEventListener("pointerdown", onDown);
-      window.addEventListener("pointermove", onMove);
-      window.addEventListener("pointerup", onUp);
-      dom.addEventListener("wheel", onWheel, { passive: false });
-      dom.addEventListener("contextmenu", onContextMenu);
-      dom.addEventListener("dblclick", onDoubleClick);
-      window.addEventListener("keydown", onKey);
-      // Any user interaction → schedule a render.
-      dom.addEventListener("pointerdown", markDirty);
-      window.addEventListener("pointermove", markDirty);
-      dom.addEventListener("wheel", markDirty);
-      // Skip key-driven redraws when the user is typing in an input — those
-      // keystrokes don't change the camera (see isTypingTarget guard above).
-      const markDirtyKey = (e: KeyboardEvent) => {
-        if (isTypingTarget(e)) return;
-        markDirty();
+      // Double-click to recenter the orbit target on the picked point. We
+      // raycast against the streaming Points cloud and use the world-space
+      // hit (three.js inverse-transforms the ray into local space when the
+      // cloud's Object3D matrix is non-identity — important now that the
+      // Stage-4 level transform lives on cloud.matrix).
+      const raycaster = new Raycaster();
+      const ndc = new Vector2();
+      raycaster.params.Points = { threshold: 0.02 };
+      // Deferred deselect — fires on a stationary single click that isn't
+      // followed by a dblclick within DBLCLICK_GUARD_MS. Lets the user
+      // escape the "camera locked to selected annotation" state by clicking
+      // empty space.
+      let deselectTimer: ReturnType<typeof setTimeout> | null = null;
+      const clearDeselectTimer = () => {
+        if (deselectTimer) {
+          clearTimeout(deselectTimer);
+          deselectTimer = null;
+        }
       };
-      window.addEventListener("keydown", markDirtyKey);
-      window.addEventListener("resize", markDirty);
-      // Pause completely when tab is hidden; redraw once when it comes back.
+      const onDoubleClick = (e: MouseEvent) => {
+        // Cancel any pending deselect — the user is recentering, not
+        // clearing the selection.
+        clearDeselectTimer();
+        const cloud = cloudRef.current;
+        if (!cloud) return;
+        const rect = dom.getBoundingClientRect();
+        ndc.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        ndc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(ndc, camera);
+        const dist = camera.position.distanceTo(controls.target);
+        raycaster.params.Points!.threshold = Math.max(0.005, dist * 0.01);
+        const hits = raycaster.intersectObject(cloud, false);
+        if (hits.length === 0) return;
+        const p = hits[0].point;
+        // Preserve the current camera offset relative to the target so the
+        // viewing angle stays put — only the pivot moves.
+        const offset = camera.position.clone().sub(controls.target);
+        flyToRef.current = {
+          target: [p.x, p.y, p.z],
+          position: [p.x + offset.x, p.y + offset.y, p.z + offset.z],
+        };
+      };
+      dom.addEventListener("dblclick", onDoubleClick);
+
+      // Drag-vs-click discrimination: track pointer-down position so we only
+      // deselect on stationary clicks (orbit drags must not deselect).
+      const CLICK_MOVE_PX = 5;
+      const CLICK_MAX_MS = 400;
+      const DBLCLICK_GUARD_MS = 230;
+      let downX = 0;
+      let downY = 0;
+      let downAt = 0;
+      const onPointerDown = (e: PointerEvent) => {
+        if (e.button !== 0) return;
+        downX = e.clientX;
+        downY = e.clientY;
+        downAt = e.timeStamp;
+      };
+      const onPointerUp = (e: PointerEvent) => {
+        if (e.button !== 0) return;
+        const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+        const elapsed = e.timeStamp - downAt;
+        if (moved > CLICK_MOVE_PX || elapsed > CLICK_MAX_MS) return;
+        clearDeselectTimer();
+        deselectTimer = setTimeout(() => {
+          deselectTimer = null;
+          if (useUI.getState().selectedId) {
+            useUI.getState().setSelected(null);
+          }
+        }, DBLCLICK_GUARD_MS);
+      };
+      dom.addEventListener("pointerdown", onPointerDown);
+      dom.addEventListener("pointerup", onPointerUp);
+
+      const onKey = (e: KeyboardEvent) => {
+        if (isTypingTarget(e)) return;
+        if (e.key.toLowerCase() === "r") {
+          apiRef.current?.preset("reset");
+        }
+      };
+      window.addEventListener("keydown", onKey);
+
+      // Pause render-on-demand when tab is hidden; redraw once when back.
       const onVisibility = () => {
         if (document.visibilityState === "visible") dirty = true;
       };
       document.addEventListener("visibilitychange", onVisibility);
 
-      // Imperative API for outside UI (zoom buttons, minimap).
+      // Imperative API for outside UI (zoom buttons, minimap, presets).
+      // All re-framing operations push a target+position pair onto
+      // flyToRef so the tick loop interpolates smoothly to the destination
+      // rather than snapping — snapping bypasses the rest of OrbitControls'
+      // damping and feels jarring against the otherwise-smooth navigation.
+      const computePresetView = (view: PresetView): { target: Vec3; position: Vec3 } => {
+        if (view === "reset") {
+          // Re-derive from current annotations so a reset that lands after
+          // the level matrix arrived frames the leveled scene.
+          initial = computeInitial();
+          return { target: initial.lookAt, position: initial.position };
+        }
+        // Frame the scene by its bounding sphere (computed once parse
+        // completes). Before that, fall back to the initial-view scale so
+        // pre-load button mashes don't fire to (0, 0, 0).
+        const cloud = cloudRef.current;
+        const sphere = cloud?.geometry?.boundingSphere ?? null;
+        const center = sphere
+          ? new Vector3().copy(sphere.center).applyMatrix4(cloud!.matrix)
+          : new Vector3(...initial.lookAt);
+        const radius = sphere ? Math.max(sphere.radius, 0.5) : 2.5;
+        // Position the camera just inside the bounding sphere so the user
+        // ends up inside the room shell looking across, rather than way
+        // outside seeing the back of the walls. zoomToCursor + scroll lets
+        // them tighten or back off from there.
+        const t: Vec3 = [center.x, center.y, center.z];
+        if (view === "top") {
+          // Top is well inside the bounding sphere so the user lands
+          // already 'in the room' looking down, instead of hovering above
+          // the ceiling shell. Tiny z offset avoids the gimbal
+          // singularity directly overhead.
+          const topY = center.y + radius * 0.385;
+          return { target: t, position: [center.x, topY, center.z + 0.001] };
+        }
+        if (view === "front") {
+          const d = radius * 0.55;
+          return { target: t, position: [center.x, center.y + d * 0.2, center.z + d] };
+        }
+        // side — tightened a bit more than front so the user is just past
+        // the wall surface looking across.
+        const dSide = radius * 0.4;
+        return { target: t, position: [center.x + dSide, center.y + dSide * 0.2, center.z] };
+      };
+
       apiRef.current = {
         zoom: (factor) => {
-          sph.radius = Math.max(0.05, Math.min(40, sph.radius * factor));
+          const off = camera.position.clone().sub(controls.target);
+          const newLen = Math.max(
+            controls.minDistance,
+            Math.min(controls.maxDistance, off.length() * factor),
+          );
+          off.setLength(newLen);
+          camera.position.copy(controls.target).add(off);
+          controls.update();
+          markDirty();
         },
         setTarget: (xyz, radius) => {
+          // Keep the current view direction; rescale the camera offset to
+          // the requested distance (or preserve current distance if none).
+          const offset = camera.position.clone().sub(controls.target);
+          if (typeof radius === "number" && offset.lengthSq() > 1e-9) {
+            offset.setLength(Math.max(controls.minDistance, Math.min(controls.maxDistance, radius)));
+          }
           flyToRef.current = {
             target: xyz,
-            radius: radius ?? sph.radius,
+            position: [xyz[0] + offset.x, xyz[1] + offset.y, xyz[2] + offset.z],
           };
         },
         reset: () => {
-          target.set(...initial.lookAt);
-          sph.setFromVector3(
-            new Vector3(...initial.position).sub(target),
-          );
-          flyToRef.current = null;
+          initial = computeInitial();
+          flyToRef.current = {
+            target: initial.lookAt,
+            position: initial.position,
+          };
+        },
+        preset: (view) => {
+          flyToRef.current = computePresetView(view);
         },
       };
       cleanup.push(() => {
@@ -525,27 +834,19 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
         renderer.setSize(w, h);
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
+        markDirty();
       };
       window.addEventListener("resize", onResize);
 
-      // Render-on-demand at 30 fps cap. Pre-allocated working vectors to
-      // avoid per-frame GC churn. Each tick:
-      //   1. Skip entirely if the tab is hidden.
-      //   2. Compute camera target/offset; if anything moved, mark dirty.
-      //   3. Push camera state + render only when dirty (or while a fly-to
-      //      is in flight).
+      // Render-on-demand at 30 fps cap. Each tick calls
+      // OrbitControls.update() so damping continues to ease the camera
+      // after the user releases input. Renders only when something has
+      // actually changed (input, fly-to in flight, or external markDirty).
       const FRAME_INTERVAL_MS = 1000 / 30;
-      const MOVE_EPS = 1e-6;
-      const tmpVec = new Vector3();
       const tmpDir = new Vector3();
-      const tmpFlyDst = new Vector3();
+      const tmpFlyTgt = new Vector3();
+      const tmpFlyPos = new Vector3();
       let lastRender = 0;
-      let lastTheta = sph.theta;
-      let lastPhi = sph.phi;
-      let lastRadius = sph.radius;
-      let lastTargetX = target.x;
-      let lastTargetY = target.y;
-      let lastTargetZ = target.z;
       const tick = (now: number) => {
         if (document.visibilityState !== "visible") {
           raf = requestAnimationFrame(tick);
@@ -553,29 +854,23 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
         }
         const fly = flyToRef.current;
         if (fly) {
-          tmpFlyDst.set(fly.target[0], fly.target[1], fly.target[2]);
-          target.lerp(tmpFlyDst, 0.12);
-          sph.radius += (fly.radius - sph.radius) * 0.12;
-          if (target.distanceToSquared(tmpFlyDst) < 1e-5 && Math.abs(sph.radius - fly.radius) < 1e-3) {
+          tmpFlyTgt.set(fly.target[0], fly.target[1], fly.target[2]);
+          tmpFlyPos.set(fly.position[0], fly.position[1], fly.position[2]);
+          controls.target.lerp(tmpFlyTgt, 0.18);
+          camera.position.lerp(tmpFlyPos, 0.18);
+          if (
+            controls.target.distanceToSquared(tmpFlyTgt) < 1e-5 &&
+            camera.position.distanceToSquared(tmpFlyPos) < 1e-5
+          ) {
             flyToRef.current = null;
           }
           dirty = true;
         }
-        if (
-          Math.abs(sph.theta - lastTheta) > MOVE_EPS ||
-          Math.abs(sph.phi - lastPhi) > MOVE_EPS ||
-          Math.abs(sph.radius - lastRadius) > MOVE_EPS ||
-          Math.abs(target.x - lastTargetX) > MOVE_EPS ||
-          Math.abs(target.y - lastTargetY) > MOVE_EPS ||
-          Math.abs(target.z - lastTargetZ) > MOVE_EPS
-        ) {
-          dirty = true;
-        }
+        // OrbitControls.update() returns true while damping is still
+        // settling — flush the result into the render.
+        if (controls.update()) dirty = true;
 
         if (dirty && now - lastRender >= FRAME_INTERVAL_MS) {
-          tmpVec.setFromSpherical(sph);
-          camera.position.copy(target).add(tmpVec);
-          camera.lookAt(target);
           camera.getWorldDirection(tmpDir);
           setCameraRef.current(
             [camera.position.x, camera.position.y, camera.position.z],
@@ -583,12 +878,6 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
           );
           renderer.render(scene, camera);
           lastRender = now;
-          lastTheta = sph.theta;
-          lastPhi = sph.phi;
-          lastRadius = sph.radius;
-          lastTargetX = target.x;
-          lastTargetY = target.y;
-          lastTargetZ = target.z;
           dirty = false;
         }
         raf = requestAnimationFrame(tick);
@@ -639,19 +928,13 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
         }
         ownedObjects.length = 0;
         cancelAnimationFrame(raf);
-        dom.removeEventListener("pointerdown", onDown);
-        window.removeEventListener("pointermove", onMove);
-        window.removeEventListener("pointerup", onUp);
-        dom.removeEventListener("wheel", onWheel);
-        dom.removeEventListener("contextmenu", onContextMenu);
+        controls.dispose();
         dom.removeEventListener("dblclick", onDoubleClick);
+        dom.removeEventListener("pointerdown", onPointerDown);
+        dom.removeEventListener("pointerup", onPointerUp);
+        clearDeselectTimer();
         window.removeEventListener("keydown", onKey);
         window.removeEventListener("resize", onResize);
-        dom.removeEventListener("pointerdown", markDirty);
-        window.removeEventListener("pointermove", markDirty);
-        dom.removeEventListener("wheel", markDirty);
-        window.removeEventListener("keydown", markDirtyKey);
-        window.removeEventListener("resize", markDirty);
         document.removeEventListener("visibilitychange", onVisibility);
         try {
           renderer.dispose();
@@ -836,6 +1119,20 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
               });
               cloud = new Points(pointGeo, pointMat);
               cloud.frustumCulled = false; // bounds grow during stream; skip culling
+              // If Stage-4 levelling data is already known by the time we
+              // create the cloud (common: capture_map.json is 7 KB so it
+              // resolves long before the multi-GB PLY does), apply the
+              // rotation+translation to the Points object's transform. Stored
+              // vertices stay in local frame; the renderer multiplies by
+              // cloud.matrix at draw time, and raycasting transparently
+              // inverse-transforms world rays into local space.
+              {
+                const lm = levelMatrixRef.current;
+                if (lm) {
+                  cloud.matrix.copy(lm);
+                  cloud.matrixAutoUpdate = false;
+                }
+              }
               scene.add(cloud);
               shaderMatRef.current = pointMat;
               cloudRef.current = cloud;
@@ -930,39 +1227,77 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
             sizeMb: bytesRead / (1024 * 1024),
           });
 
-          // Build minimap from the now-complete cloud.
+          // Refine the level matrix against the actual cloud now that we
+          // have all the points: fit a plane to the bottom 15% and apply
+          // a small correction so the floor is exactly horizontal. The
+          // Stage-4 estimate (per-frame camera-up average) is reliable to
+          // within a few degrees; this step takes off that residual.
+          if (positions && pointsParsed > 0) {
+            const base = levelMatrixRef.current;
+            if (base) {
+              const refined = refineLevelMatrix(positions, pointsParsed, base);
+              if (refined !== base) {
+                // Update the ref synchronously so the minimap build below
+                // uses the refined frame; React state update is for the
+                // annotation overlay (and any other consumer of the memo).
+                levelMatrixRef.current = refined;
+                setLevelMatrix(refined);
+                if (cloud) {
+                  cloud.matrix.copy(refined);
+                  cloud.matrixAutoUpdate = false;
+                }
+                // Re-frame the camera so the now-refined scene fills the
+                // viewport. Deferred so transformedAnnotations has time to
+                // flush before initialView re-reads annotationsRef.
+                requestAnimationFrame(() => apiRef.current?.reset());
+              }
+            }
+          }
+
+          // Build minimap from the now-complete cloud. When the Stage-4
+          // level matrix is available, sample points pass through it so the
+          // top-down preview matches the leveled 3D view (otherwise the
+          // minimap would show the tilted PLY frame while the viewer shows
+          // it upright).
           if (positions && colors && pointsParsed > 0) {
-            const 
-            M = Math.min(8000, pointsParsed);
-            const mstride = Math.max(1, Math.floor(pointsParsed / M));
+            const targetCount = Math.min(8000, pointsParsed);
+            const mstride = Math.max(1, Math.floor(pointsParsed / targetCount));
             const xz = new Float32Array(Math.ceil(pointsParsed / mstride) * 2);
             const rgb = new Float32Array(Math.ceil(pointsParsed / mstride) * 3);
             let mi = 0;
-            let minX = Infinity,
-              maxX = -Infinity,
-              minZ = Infinity,
-              maxZ = -Infinity;
+            let mmMinX = Infinity,
+              mmMaxX = -Infinity,
+              mmMinZ = Infinity,
+              mmMaxZ = -Infinity;
+            const lm = levelMatrixRef.current;
+            const tmpP = new Vector3();
             for (let i = 0; i < pointsParsed; i += mstride) {
-              const x = positions[i * 3];
-              // positions[i*3+2] is already flipped (negated) at parse-time.
-              // For top-down minimap, undo so the orientation matches the
-              // user's mental "north = original +Z forward".
-              const z = -positions[i * 3 + 2];
+              tmpP.set(
+                positions[i * 3],
+                positions[i * 3 + 1],
+                positions[i * 3 + 2],
+              );
+              if (lm) tmpP.applyMatrix4(lm);
+              const x = tmpP.x;
+              // Negate world Z so "north" reads as upward in the minimap,
+              // matching the user's mental model of looking forward into
+              // the captured space.
+              const z = -tmpP.z;
               xz[mi * 2] = x;
               xz[mi * 2 + 1] = z;
               rgb[mi * 3] = colors[i * 3] / 255;
               rgb[mi * 3 + 1] = colors[i * 3 + 1] / 255;
               rgb[mi * 3 + 2] = colors[i * 3 + 2] / 255;
-              if (x < minX) minX = x;
-              if (x > maxX) maxX = x;
-              if (z < minZ) minZ = z;
-              if (z > maxZ) maxZ = z;
+              if (x < mmMinX) mmMinX = x;
+              if (x > mmMaxX) mmMaxX = x;
+              if (z < mmMinZ) mmMinZ = z;
+              if (z > mmMaxZ) mmMaxZ = z;
               mi++;
             }
             setMiniPoints({
               xz: xz.subarray(0, mi * 2),
               rgb: rgb.subarray(0, mi * 3),
-              bounds: { minX, maxX, minZ, maxZ },
+              bounds: { minX: mmMinX, maxX: mmMaxX, minZ: mmMinZ, maxZ: mmMaxZ },
             });
           }
 
@@ -1175,7 +1510,7 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
       >
         {showAnnotations && (
           <AnnotationOverlay
-            annotations={annotations}
+            annotations={transformedAnnotations}
             getCamera={() => sceneRef.current.camera}
             containerRef={overlayRef}
           />
@@ -1184,11 +1519,12 @@ export function PointCloudViewer({ pointsUrl, annotations, emptyCloud }: Props) 
       <ViewerToolbar />
       <DebugHUD debug={debug} />
       <ControlsHint
-        annotations={annotations}
+        annotations={transformedAnnotations}
         onSelect={(id) => useUI.getState().setSelected(id)}
         onZoomIn={() => apiRef.current?.zoom(0.7)}
         onZoomOut={() => apiRef.current?.zoom(1.4)}
         onReset={() => apiRef.current?.reset()}
+        onPreset={(view) => apiRef.current?.preset(view)}
       />
       {miniPoints && (
         <Minimap
@@ -1211,8 +1547,8 @@ function ViewerToolbar() {
   const cycleRenderMode = useUI((s) => s.cycleRenderMode);
   const showAnnotations = useUI((s) => s.showAnnotations);
   const toggleAnnotations = useUI((s) => s.toggleAnnotations);
-  const showFreespace = useUI((s) => s.showFreespace);
-  const toggleFreespace = useUI((s) => s.toggleFreespace);
+  const showCaptureMap = useUI((s) => s.showCaptureMap);
+  const toggleCaptureMap = useUI((s) => s.toggleCaptureMap);
   const modeLabel =
     renderMode === "depth" ? "Depth" : renderMode === "confidence" ? "Confidence" : "RGB";
 
@@ -1237,15 +1573,15 @@ function ViewerToolbar() {
         {showAnnotations ? "● Annotations" : "Annotations"}
       </button>
       <button
-        onClick={toggleFreespace}
+        onClick={toggleCaptureMap}
         className={`rounded-md border px-2.5 py-1 font-mono text-[11px] backdrop-blur ${
-          showFreespace
+          showCaptureMap
             ? "border-accent-400/80 bg-accent-500/15 text-accent-100"
             : "border-ink-700/70 bg-ink-900/85 text-ink-100 hover:border-accent-400/60 hover:text-accent-200"
         }`}
-        title="Show/hide the humanoid traversability grid (Stage 5)"
+        title="Show/hide the top-down capture map (Stage 4)"
       >
-        {showFreespace ? "● Free space" : "Free space"}
+        {showCaptureMap ? "● Capture map" : "Capture map"}
       </button>
     </div>
   );
@@ -1257,12 +1593,14 @@ function ControlsHint({
   onZoomIn,
   onZoomOut,
   onReset,
+  onPreset,
 }: {
   annotations: Annotation[];
   onSelect: (id: string) => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onReset: () => void;
+  onPreset: (view: "top" | "front" | "side" | "reset") => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -1278,10 +1616,9 @@ function ControlsHint({
               <li><kbd className="font-mono opacity-80">drag</kbd> orbit</li>
               <li><kbd className="font-mono opacity-80">dbl-click</kbd> recenter on point</li>
               <li><kbd className="font-mono opacity-80">shift+drag</kbd> / right-drag — pan</li>
-              <li><kbd className="font-mono opacity-80">wheel</kbd> zoom</li>
-              <li><kbd className="font-mono opacity-80">W A S D</kbd> move target</li>
-              <li><kbd className="font-mono opacity-80">Q E</kbd> up/down</li>
-              <li><kbd className="font-mono opacity-80">R</kbd> reset</li>
+              <li><kbd className="font-mono opacity-80">wheel</kbd> zoom toward cursor</li>
+              <li><kbd className="font-mono opacity-80">pinch</kbd> zoom (trackpad / touch)</li>
+              <li><kbd className="font-mono opacity-80">R</kbd> reset view</li>
             </ul>
             {annotations.length > 0 && (
               <>
@@ -1312,7 +1649,10 @@ function ControlsHint({
         </button>
       </div>
 
-      {/* Zoom + reset on the right edge, just below the minimap. */}
+      {/* Right-edge column: zoom + reset (top), preset views (bottom). The
+          presets give one-click access to the canonical orientations users
+          normally have to compose by hand (top-down for floor planning,
+          front/side for elevation views). */}
       <div className="pointer-events-auto absolute right-3 top-[210px] flex flex-col gap-1.5">
         <button
           onClick={onZoomIn}
@@ -1338,6 +1678,29 @@ function ControlsHint({
         >
           ↺
         </button>
+        <div className="mt-2 flex flex-col gap-1 rounded-md border border-ink-700/70 bg-ink-900/80 p-1.5 font-mono text-[10px] backdrop-blur">
+          <button
+            onClick={() => onPreset("top")}
+            className="rounded px-2 py-1 text-ink-200 hover:bg-accent-500/15 hover:text-accent-200"
+            title="Top-down floor plan view"
+          >
+            top
+          </button>
+          <button
+            onClick={() => onPreset("front")}
+            className="rounded px-2 py-1 text-ink-200 hover:bg-accent-500/15 hover:text-accent-200"
+            title="Front elevation"
+          >
+            front
+          </button>
+          <button
+            onClick={() => onPreset("side")}
+            className="rounded px-2 py-1 text-ink-200 hover:bg-accent-500/15 hover:text-accent-200"
+            title="Side elevation"
+          >
+            side
+          </button>
+        </div>
       </div>
     </>
   );
@@ -1402,10 +1765,13 @@ function Minimap({
   // store is in renderer-frame z. Negate to bring the marker into the same
   // frame as the points; otherwise the marker shows up mirrored on Z.
   const [camPx, camPy] = worldToCanvas(camera.position[0], -camera.position[2]);
-  // Direction was already PLY-frame: `-camera.direction[2]` flips renderer-z
-  // → PLY-z so the arrow points the correct way relative to the (PLY-frame)
-  // canvas without further adjustment.
-  const dirAngle = Math.atan2(-camera.direction[2], camera.direction[0]);
+  // SVG `rotate(α)` (CW) maps the arrow's natural "up" vector to
+  // (sin α, -cos α). The arrow points in renderer XZ space projected to
+  // canvas: canvas-right = +x_renderer, canvas-up = -z_renderer (since
+  // canvas-y = SIZE/2 - (z_ply - cz)·scale and z_ply = -z_renderer).
+  // So we need (sin α, -cos α) = (dx, dz) → α = atan2(dx, -dz).
+  const dirAngleDeg =
+    (Math.atan2(camera.direction[0], -camera.direction[2]) * 180) / Math.PI;
 
   return (
     <div className="pointer-events-auto absolute right-3 top-3 select-none">
@@ -1430,7 +1796,7 @@ function Minimap({
           height={SIZE}
           className="pointer-events-none absolute inset-0"
         >
-          <g transform={`translate(${camPx}, ${camPy}) rotate(${(-dirAngle * 180) / Math.PI})`}>
+          <g transform={`translate(${camPx}, ${camPy}) rotate(${dirAngleDeg})`}>
             <polygon
               points="0,-7 5,5 0,2 -5,5"
               fill="#a78bfa"
@@ -1501,26 +1867,56 @@ function DebugHUD({ debug }: { debug: DebugState }) {
   );
 }
 
-function initialView(annotations: Annotation[]): {
+/** Per-axis median — robust to outlier frames at the start/end of capture
+ *  where the user is fumbling the phone. Mean would get yanked by those. */
+function medianVec3(pts: Vec3[]): Vec3 {
+  const xs = pts.map((p) => p[0]).sort((a, b) => a - b);
+  const ys = pts.map((p) => p[1]).sort((a, b) => a - b);
+  const zs = pts.map((p) => p[2]).sort((a, b) => a - b);
+  const mid = (xs.length - 1) / 2;
+  const lo = Math.floor(mid);
+  const hi = Math.ceil(mid);
+  return [(xs[lo] + xs[hi]) / 2, (ys[lo] + ys[hi]) / 2, (zs[lo] + zs[hi]) / 2];
+}
+
+function initialView(
+  annotations: Annotation[],
+  cameraCenters: Vec3[] = [],
+): {
   position: [number, number, number];
   lookAt: [number, number, number];
 } {
+  // Annotation-centroid average is what we look at — the densest cluster of
+  // labelled stuff is the most natural "scene center."
+  const annoCenter: Vec3 =
+    annotations.length === 0
+      ? [0, 0.8, 0]
+      : (() => {
+          const s = annotations.reduce<Vec3>(
+            (acc, a) => [
+              acc[0] + a.centroid[0],
+              acc[1] + a.centroid[1],
+              acc[2] + a.centroid[2],
+            ],
+            [0, 0, 0],
+          );
+          const n = annotations.length;
+          return [s[0] / n, s[1] / n, s[2] / n];
+        })();
+
+  // Prefer the median capture position — that's literally "where the user
+  // was standing in the room" — so the viewer spawns inside the scene at
+  // eye level rather than offset along an arbitrary diagonal.
+  if (cameraCenters.length > 0) {
+    const pos = medianVec3(cameraCenters);
+    return { position: pos, lookAt: annoCenter };
+  }
   if (annotations.length === 0) {
     return { position: [2, 1.6, 2], lookAt: [0, 0.8, 0] };
   }
-  // Center on annotation centroid average, pull the camera back along +Z+Y.
-  const c = annotations.reduce<[number, number, number]>(
-    (acc, a) => [
-      acc[0] + a.centroid[0],
-      acc[1] + a.centroid[1],
-      acc[2] + a.centroid[2],
-    ],
-    [0, 0, 0],
-  );
-  const n = annotations.length;
-  const center: [number, number, number] = [c[0] / n, c[1] / n, c[2] / n];
+  // Fallback for old scenes with no cameras.json — keep the legacy offset.
   return {
-    position: [center[0] + 1.5, center[1] + 0.6, center[2] + 1.5],
-    lookAt: center,
+    position: [annoCenter[0] + 1.5, annoCenter[1] + 0.6, annoCenter[2] + 1.5],
+    lookAt: annoCenter,
   };
 }

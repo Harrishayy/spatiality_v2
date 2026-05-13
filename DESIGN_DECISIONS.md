@@ -269,7 +269,7 @@ SAM 2's mask-propagation, which gave us implicit cross-frame identity but at the
 
 ### Tradeoffs
 
-- DINOv2-small is 384-dim and ~85 MB on disk; total embedding cost is ~5 ms per detection batched 64-wide on A100. For a 500-frame scene with 3 to 8 k detections that's +20 to 40 s on Stage 2.
+- DINOv2-small is 384-dim and ~85 MB on disk; total embedding cost is ~5 ms per detection batched 64-wide on A100. For a 500-frame scene with 3 to 8 k detections that's +20 to 40 s on Stage 3.3.
 
 - We chose DINOv2-small over OpenCLIP-ViT-B/32 because the indoor-furniture domain is closer to ImageNet-style natural images than to CLIP's web-scraped distribution. DINOv2's instance-level features cluster crops of the *same physical chair* tighter than CLIP does.
 

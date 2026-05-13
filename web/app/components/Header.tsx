@@ -14,11 +14,11 @@ export function Header({ manifest }: Props) {
   const sceneId = manifest?.scene_id;
   return (
     <header className="lp-app-header">
-      <Link href="/" className="lp-app-brand" aria-label="Spatiality — home">
+      <Link href="/" className="lp-app-brand" aria-label="spatiality_v2 — home">
         <span className="lp-app-brand-mark" />
         <div className="lp-app-brand-meta">
-          <span className="lp-app-brand-title">Spatiality</span>
-          <span className="lp-app-brand-id">fast 3D mesh inference</span>
+          <span className="lp-app-brand-title">spatiality_v2</span>
+          <span className="lp-app-brand-id">phone to spatial 3D</span>
         </div>
       </Link>
       <div className="lp-app-header-center">
@@ -57,9 +57,17 @@ function CostBadge({
   );
 }
 
+// Pre-baked scenes (e.g. the hosted demo) get a humanised default name so
+// the header doesn't read "Untitled scene" before the user has typed
+// anything. Real upload-flow scenes still start blank.
+const SCENE_DEFAULT_NAMES: Record<string, string> = {
+  demo_piece: "Demo Piece",
+};
+
 function SceneNameField({ sceneId }: { sceneId: string }) {
   // TODO(swap): persist via /agent PATCH onto manifest.json instead of localStorage.
   const storageKey = `spatiality.sceneName.${sceneId}`;
+  const defaultName = SCENE_DEFAULT_NAMES[sceneId] ?? "";
   const [name, setName] = useState("");
   const [hydrated, setHydrated] = useState(false);
 
@@ -68,9 +76,9 @@ function SceneNameField({ sceneId }: { sceneId: string }) {
       typeof window !== "undefined"
         ? window.localStorage.getItem(storageKey)
         : null;
-    setName(stored ?? "");
+    setName(stored ?? defaultName);
     setHydrated(true);
-  }, [storageKey]);
+  }, [storageKey, defaultName]);
 
   function commit(next: string) {
     const trimmed = next.trim().slice(0, 64);

@@ -20,14 +20,14 @@ export type DiscardStage = "gdino" | "lift" | "postprocess";
 /** Reasons a track can be cut. The set is a flat union across stages —
  *  `stage` plus `discard_reason` together identifies the cause. */
 export type DiscardReason =
-  // GDINO (Stage 2 — detection + IoU tracklets)
+  // GDINO (Stage 3.2 — detection + IoU tracklets)
   | "short_tracklet"
-  // 3D lift (Stage 3)
+  // 3D lift (Stage 3.5)
   | "multiview_filter"
   | "3d_coherence"
   | "reprojection"
   | "merged_3d"
-  // Lane B postprocess (Stage 4B cleanup)
+  // Lane B postprocess (Stage 3.6 cleanup)
   | "scene_label"
   | "low_confidence"
   | "oversize"
@@ -116,8 +116,8 @@ export interface Manifest {
     annotations_json?: string;
     thumbnail_jpg?: string;
     cameras_json?: string;
-    traversability_json?: string;
-    traversability_png?: string;
+    capture_map_json?: string;
+    capture_map_png?: string;
   };
   stats: {
     frame_count: number;

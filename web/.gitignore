@@ -8,3 +8,4 @@ tsconfig.tsbuildinfo
 
 # Generated scene artifacts served by Next.js — large binaries, regenerate per scene.
 public/artifacts/
+.vercel

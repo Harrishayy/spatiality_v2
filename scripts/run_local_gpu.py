@@ -24,7 +24,7 @@ What this script does
    blur-prefilter oversample factor stays identical).
 3. Calls ``spatiality.inference.run`` in-process (FlashVGGT geometry).
 4. Calls ``spatiality.segmentation.run`` in-process (GDINO → re-ID → lift →
-   Lane B → Lane C → Stage 5 free-space).
+   Lane B → Lane C → Stage 4 capture map).
 5. Writes ``manifest.json`` plus all artefacts under
    ``backend/data/outputs/<scene_id>/``, exactly where the FastAPI viewer
    reads them from.
@@ -160,9 +160,9 @@ def main() -> int:
     parser.add_argument("--skip-extract", action="store_true",
                         help="Skip ffmpeg frame extraction (frames/*.png already on disk).")
     parser.add_argument("--skip-inference", action="store_true",
-                        help="Skip Stage 1; assumes points.ply + depth/ already exist.")
+                        help="Skip Stage 2; assumes points.ply + depth/ already exist.")
     parser.add_argument("--skip-segmentation", action="store_true",
-                        help="Skip Stages 2–5 (geometry only).")
+                        help="Skip Stages 3 and 4 (geometry only).")
     args = parser.parse_args()
 
     scene_id: str = args.scene_id
@@ -212,7 +212,7 @@ def main() -> int:
         )
 
     if not args.skip_inference:
-        print("[local-gpu] === Stage 1: FlashVGGT geometry ===", flush=True)
+        print("[local-gpu] === Stage 2: FlashVGGT geometry ===", flush=True)
         t_inf = time.time()
         # In-process call — same entry point Modal's run_inference_one uses
         # via ``Function.from_name``.
@@ -224,10 +224,10 @@ def main() -> int:
             flush=True,
         )
     else:
-        print("[local-gpu] (Stage 1 skipped)", flush=True)
+        print("[local-gpu] (Stage 2 skipped)", flush=True)
 
     if not args.skip_segmentation:
-        print("[local-gpu] === Stages 2–5: segmentation + free-space ===", flush=True)
+        print("[local-gpu] === Stages 3 and 4: segmentation + capture map ===", flush=True)
         t_seg = time.time()
         from spatiality.segmentation import run as run_segmentation  # noqa: E402
 

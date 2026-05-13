@@ -13,7 +13,7 @@ Approach:
     ``α · IoU + (1 - α) · cosine`` instead of pure IoU.
 
 Cost on A100: ~5 ms / detection batched 64-wide. For typical scenes with
-3-8k detections this is +20-40 s on Stage 2, with substantial gains in
+3-8k detections this is +20-40 s on Stage 3.2, with substantial gains in
 tracker continuity.
 
 Disable via ``SPATIALITY_DISABLE_REID=1`` for debug.

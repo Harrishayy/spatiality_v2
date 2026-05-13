@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  fetchCameraCenters,
   fetchDiscardedAnnotations,
   fetchLanePayload,
   fetchManifest,
@@ -100,11 +101,24 @@ export function useScene(sceneId: string) {
     enabled: segReady,
   });
 
+  // Camera centers from cameras.json — used by the viewer to spawn the
+  // initial camera inside the room (where the user was actually standing
+  // when capturing), rather than 1.5m offset from the annotation centroid.
+  // Available as soon as poses are written; doesn't depend on segmentation.
+  const posesReady = manifest.data?.stages.poses.status === "complete";
+  const cameraCenters = useQuery({
+    queryKey: ["cameraCenters", sceneId],
+    queryFn: () => fetchCameraCenters(sceneId),
+    enabled: posesReady,
+    staleTime: Infinity,
+  });
+
   return {
     manifest,
     annotations,
     discarded,
     pointsUrl,
+    cameraCenters,
     pointsReady,
     segReady,
   };

@@ -90,13 +90,30 @@ function Stats({
   manifest: Manifest;
   cloudStats: { count: number; sizeMb: number } | null;
 }) {
-  const captured = manifest.stats.frame_count;
+  // `captured` is the ffmpeg-extracted frame count (pre-blur-filter); set on
+  // the capture stage and mirrored to stats. `used` is what survived the
+  // blur filter and went into VGGT. We display "used / captured" only when
+  // both are known and different — otherwise fall back to whichever number
+  // we have, so older scenes that recorded only one don't show "720 / 0".
+  const captureRaw = manifest.stages.capture?.["frame_count"];
+  const captured =
+    typeof captureRaw === "number" && captureRaw > 0
+      ? captureRaw
+      : manifest.stats.frame_count > 0
+        ? manifest.stats.frame_count
+        : null;
   const usedRaw = manifest.stages.poses["frame_count"];
   const used = typeof usedRaw === "number" ? usedRaw : null;
-  const frameValue =
-    used !== null && used !== captured
-      ? `${used} / ${captured}`
-      : `${captured}`;
+  let frameValue: string;
+  if (used !== null && captured !== null && used !== captured) {
+    frameValue = `${used} / ${captured}`;
+  } else if (used !== null) {
+    frameValue = `${used}`;
+  } else if (captured !== null) {
+    frameValue = `${captured}`;
+  } else {
+    frameValue = "—";
+  }
 
   const manifestPointsRaw = manifest.stages.splat["gaussian_count"];
   const manifestPoints =

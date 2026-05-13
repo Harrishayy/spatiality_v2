@@ -33,7 +33,7 @@ Usage
     python scripts/build_demo_scene.py --no-zip       # skip the 1.3 GB zip write
     python scripts/build_demo_scene.py --no-r2        # skip the R2 staging dir
 
-Dependencies: numpy + Pillow (same set Stage 5 uses).
+Dependencies: numpy + Pillow (same set Stage 4 uses).
 """
 
 from __future__ import annotations
@@ -64,8 +64,8 @@ _USER_FACING_FILES = (
     "annotations.b.json",
     "annotations.c.json",
     "annotations.b.discarded.json",
-    "traversability.json",
-    "traversability.png",
+    "capture_map.json",
+    "capture_map.png",
 )
 _USER_FACING_DIRS = (
     "evidence",
@@ -84,7 +84,7 @@ def _trim_manifest_text(src_manifest: Path) -> str:
     keep = {
         "splat_ply", "cameras_json", "annotations_json",
         "annotations_b_json", "annotations_c_json",
-        "traversability_json", "traversability_png",
+        "capture_map_json", "capture_map_png",
         "thumbnail_jpg",
     }
     a = m.get("artifacts", {}) or {}
@@ -93,22 +93,21 @@ def _trim_manifest_text(src_manifest: Path) -> str:
     return json.dumps(m, indent=2)
 
 
-def _ensure_stage5() -> None:
-    """Run Stage 5 on the source scene if traversability.json isn't present.
+def _ensure_stage4() -> None:
+    """Run Stage 4 on the source scene if capture_map.json isn't present.
 
-    The committed demo_piece pre-dates Stage 5, so this nearly always runs.
-    Idempotent — compute_freespace overwrites cleanly.
+    Idempotent — compute_capture_map overwrites cleanly.
     """
     if (
-        (SRC_SCENE / "traversability.json").exists()
-        and (SRC_SCENE / "traversability.png").exists()
+        (SRC_SCENE / "capture_map.json").exists()
+        and (SRC_SCENE / "capture_map.png").exists()
     ):
         return
-    print("[demo] Stage 5 artefacts missing in source; running compute_freespace …")
+    print("[demo] Stage 4 artefacts missing in source; running compute_capture_map …")
     sys.path.insert(0, str(REPO / "backend" / "src"))
-    from spatiality.nav.freespace import compute_freespace  # noqa: E402
+    from spatiality.nav.capture_map import compute_capture_map  # noqa: E402
 
-    compute_freespace(SRC_SCENE)
+    compute_capture_map(SRC_SCENE)
 
 
 def _iter_payload() -> list[tuple[Path, str]]:
@@ -202,7 +201,7 @@ def main() -> int:
         print(f"error: no source scene at {SRC_SCENE}", file=sys.stderr)
         return 2
 
-    _ensure_stage5()
+    _ensure_stage4()
 
     items = _iter_payload()
     trimmed_manifest = _trim_manifest_text(SRC_SCENE / "manifest.json")

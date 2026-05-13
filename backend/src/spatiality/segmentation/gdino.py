@@ -1,6 +1,6 @@
 """Grounding DINO open-vocab detection + IoU tracklet linking.
 
-Stage 2 of the segmentation pipeline. Replaces the prior GDINO + SAM 2.1 stack:
+Substages 3.2 (detection), 3.3 (ReID), and 3.4 (linking) of the segmentation pipeline. Replaces the prior GDINO + SAM 2.1 stack:
 SAM 2 mask propagation is gone, so each IoU-linked tracklet becomes a
 ``Track`` directly with per-frame bboxes. The web UI never rendered masks
 and the lift stage now reads bboxes (not masks), so SAM 2 was paying for
@@ -185,7 +185,7 @@ def _build_gdino():
     return processor, model
 
 
-# ---------------------------------------------------------------------------- stage 1: GDINO detection
+# ---------------------------------------------------------------------------- phase 1: GDINO detection
 
 
 def _canonicalize_label(raw_label: str, phrases_lower: list[str]) -> str | None:
@@ -369,11 +369,11 @@ def _filter_by_scope(
     """Drop per-frame detections whose absolute frame index falls outside the phrase's scout-assigned range.
 
     ``phrase_to_dets`` keys are positions in gdino's *filtered* frame list
-    (Stage-1 frame-selection drops unposed frames). Scout computed
+    (Stage-2 frame-selection drops unposed frames). Scout computed
     ``frame_range`` against the *unfiltered* frame list. We map filtered
     fidx → unfiltered idx via ``filtered_to_absolute`` so the comparison
     is apples-to-apples; without this the scope filter mis-aligns by
-    however many frames Stage 1 dropped.
+    however many frames Stage 2 dropped.
 
     Phrases with frame_range=None (the global safety net like "person")
     pass through untouched. Phrases that don't appear in ``scoped`` (e.g.
@@ -405,7 +405,7 @@ def _filter_by_scope(
     return out, n_dropped
 
 
-# ---------------------------------------------------------------------------- stage 2: tracklet linking
+# ---------------------------------------------------------------------------- phase 2: tracklet linking
 
 
 # Linker scoring weights when DINOv2 embeddings are available. α = IoU
@@ -511,7 +511,7 @@ def _tracklets_for_phrase(
     return survivors
 
 
-# ---------------------------------------------------------------------------- stage 3: assembly + writeout
+# ---------------------------------------------------------------------------- phase 3: assembly + writeout
 
 
 def _tracklet_to_track(
@@ -604,7 +604,7 @@ def run_gdino(
         p: i for i, p in enumerate(unfiltered_frame_paths)
     }
 
-    # Resume shortcut: if a prior Stage 2 already wrote tracks.json, parse
+    # Resume shortcut: if a prior Stage 3.2 already wrote tracks.json, parse
     # it back into Track objects and skip GDINO entirely.
     tracks_path = out_dir / "tracks.json"
     if tracks_path.exists():
@@ -652,12 +652,12 @@ def run_gdino(
         dropped = before - len(frame_paths)
         if dropped:
             print(f"[gdino] filtered {before} → {len(frame_paths)} frames "
-                  f"(dropped {dropped} without camera/depth — Stage 1 frame-selection)",
+                  f"(dropped {dropped} without camera/depth — Stage 2 frame-selection)",
                   flush=True)
         if not frame_paths:
             raise SystemExit(
                 f"no frames in {frames_dir} have camera/depth/conf — "
-                f"run Stage 1 inference first"
+                f"run Stage 2 inference first"
             )
 
     # Drop 0-byte / unreadable PNGs. Inference's frame writer can leave
@@ -670,13 +670,13 @@ def run_gdino(
     if dropped:
         print(f"[gdino] dropped {dropped} 0-byte / corrupt frame PNGs", flush=True)
 
-    # Stage-1 presence check (separate from the 0-byte filter above; the
+    # Stage-2 presence check (separate from the 0-byte filter above; the
     # previous version raised here as a side-effect of the `else` branch
-    # whenever no PNGs were dropped, even when Stage 1 was healthy).
+    # whenever no PNGs were dropped, even when Stage 2 was healthy).
     missing = [p for p in (cameras_path, depth_dir, conf_dir) if not p.exists()]
     if missing:
         raise SystemExit(
-            f"Stage 1 outputs missing: {[str(m) for m in missing]} — "
+            f"Stage 2 outputs missing: {[str(m) for m in missing]} — "
             f"run inference first"
         )
 
@@ -696,7 +696,7 @@ def run_gdino(
         if stale.exists():
             shutil.rmtree(stale, ignore_errors=True)
 
-    # ── Stage 1: single-pass multi-phrase detection ───────────────────────
+    # ── Phase 1: single-pass multi-phrase detection (Stage 3.2) ───────────
     proc, gdino = _build_gdino()
     phrases = [prompt.phrase for prompt in scoped]
     print(f"[gdino] running multi-phrase GDINO sweep over {n_frames} frames "
@@ -765,7 +765,7 @@ def run_gdino(
                     if e is not None:
                         det.embed = e
 
-    # ── Stage 2: per-phrase tracklet linking → Track objects ──────────────
+    # ── Phase 2: per-phrase tracklet linking → Track objects (Stage 3.4) ──
     tracks: list[Track] = []
     next_obj_id = 1
     for label, per_frame_dets in phrase_to_dets.items():
@@ -791,7 +791,7 @@ def run_gdino(
     # Persist short-tracklet drops so the UI's Discarded tab can show them
     # alongside lift-stage and postprocess-stage drops. Each record carries
     # `stage` + `discard_reason` so the frontend can group them. Geometry
-    # fields are absent here (no 3D yet — these never made it past Stage 2).
+    # fields are absent here (no 3D yet — these never made it past Stage 3.4).
     short_records = [
         {
             "id": t.track_id,

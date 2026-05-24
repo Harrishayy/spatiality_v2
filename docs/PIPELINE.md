@@ -140,7 +140,7 @@ See `backend/src/spatiality/inference/flashvggt.py::load_model`.
 
 Before the model sees anything, we drop the bottom 20% of frames by Laplacian variance, a cheap motion-blur proxy where blurry frames have small Laplacian responses.
 
-This is the single highest-impact fix for handheld iPhone captures. A single blurry frame mid-sequence is enough to send the pose head's global feature bank into a wrong attractor and produce **ghost-duplicates** of objects in the resulting cloud.
+This matters for handheld iPhone captures because a single blurry frame mid-sequence can push the pose head's global feature bank into a wrong attractor, producing ghost-duplicates of objects in the resulting cloud.
 
 See the comment block at `inference/run.py:200-218` for the exact failure case we caught.
 
@@ -748,7 +748,7 @@ python scripts/run_local_gpu.py <scene_id>
 
 # (optional) view in the web UI, the FastAPI server just serves files
 uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload
-cd web && pnpm dev  # http://localhost:3000/scenes/<scene_id>
+cd web && pnpm dev  # http://localhost:5173/scenes/<scene_id>
 ```
 
 The local-GPU runner sets `SPATIALITY_DATA_ROOT=backend/data/inputs` and `SPATIALITY_ARTEFACTS_ROOT=backend/data/outputs`, then calls `spatiality.inference.run` and `spatiality.segmentation.run` in-process, the same entry points Modal's `run_inference_one` / `run_segmentation_one` wrappers delegate to. The web viewer is identical either way: it just reads `backend/data/outputs/<scene_id>/`.

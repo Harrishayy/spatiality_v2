@@ -2,13 +2,13 @@
 
 **Phone video → 3D scene + open-vocabulary semantic labels + top-down capture map.**
 
-From a 30–60 second handheld phone capture, the pipeline runs three lanes in parallel and joins them in the viewer:
+From a 30–60 second handheld phone capture, the pipeline runs three stages that feed into the viewer:
 
 - **Geometry** — ffmpeg + Laplacian-variance blur pre-filter → **FlashVGGT** single-forward dense pose + depth + per-pixel `world_points` on A100-80GB.
 - **Semantics** — **Gemini** scene scout → **Grounding DINO** detection per slice → **DINOv2** appearance re-ID → multi-view 3-D lift off VGGT's `world_points` (gated by **SAM 2.1** masks) → **Gemini Lane B + Lane C** two-pass labelling (per-track, then whole-scene coherence review).
 - **Capture map** — Stage 4 floor-fit + above-floor density rasterisation. CPU only, no model.
 
-Outputs: a **12–50 M-point coloured cloud** with per-frame OpenCV cameras, **~30 open-vocab 3D-labelled objects**, and a **5 cm top-down density map** — end-to-end in ~14–19 min on Modal A100s. No calibration capture, no fixed taxonomy, no manual labelling.
+Outputs: a **12–50 M-point coloured cloud** with per-frame OpenCV cameras, **~30 open-vocab 3D-labelled objects**, and a **5 cm top-down density map** — end-to-end in ~14–19 min on Modal A100s.
 
 &nbsp;
 
@@ -75,7 +75,7 @@ unzip /tmp/demo_piece_outputs.zip -d backend/data/outputs/
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ./backend
 
-# Orchestrator on :8765, then viewer on :3000 in a second shell.
+# Orchestrator on :8765, then viewer on :5173 in a second shell.
 uvicorn backend.main:app --port 8765 --reload &
 cd web && pnpm install && pnpm dev
 ```
@@ -100,7 +100,7 @@ pip install modal && modal token new
 modal deploy backend/modal/inference.py
 modal deploy backend/modal/segmentation.py
 
-# Orchestrator (:8765) + viewer (:3000) in two shells.
+# Orchestrator (:8765) + viewer (:5173) in two shells.
 uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload
 cd web && pnpm install && pnpm dev
 ```
@@ -194,27 +194,25 @@ flowchart LR
     nav --> viewer
 ```
 
-Two parallel branches fork off the dense cloud and rejoin in the viewer:
+Two branches fork off the dense cloud and rejoin in the viewer:
 
 - **Geometry (top of diagram).** ffmpeg extracts frames → a Laplacian-variance blur pre-filter drops the bottom 20 % → FlashVGGT runs a single forward pass over the whole sequence on an A100-80GB → out comes a coloured point cloud (`points.ply`), per-frame camera intrinsics and extrinsics (`cameras.json`), per-frame depth, and, critically, VGGT's `point_head` outputs (`world_points` + `world_points_conf`). Every downstream stage is wired to consume those tensors.
-- **Semantics (middle).** Gemini 2.5 Flash plays "scene scout" over temporal slices and proposes the noun phrases it actually sees → Grounding DINO detects those phrases per slice → a SORT-style linker with DINOv2-small appearance embeddings forms 2-D tracklets → **the 3-D lift uses VGGT's `world_points` tensor as the source of truth for each pixel's xyz, sampling only the pixels SAM 2.1 marks as belonging to the object, then keeping a point only if it reprojects into ≥ 50 % of other frames' masks**. No manual `K⁻¹ · depth · pixel` unprojection, no separate triangulation step. → Lane B labels every track in isolation via Gemini → Lane C reviews the whole scene in one Gemini call and relabels, drops, or merges tracks for coherence.
-- **Capture map (bottom).** Stage 4 takes the same `world_points` cloud directly, fits a floor plane to it, and rasterises above-floor density into a top-down PNG + JSON. CPU only, no extra model.
+- **Semantics (middle).** Gemini 2.5 Flash acts as a scene scout over temporal slices and proposes noun phrases → Grounding DINO detects those phrases per slice → a SORT-style linker with DINOv2-small appearance embeddings forms 2-D tracklets → the 3-D lift reads each pixel's xyz from VGGT's `world_points` tensor, sampling pixels SAM 2.1 marks as belonging to the object, and keeps a point only if it reprojects into at least 50 % of other frames' masks. → Lane B labels every track in isolation via Gemini → Lane C reviews the whole scene in one Gemini call and relabels, drops, or merges tracks for coherence.
+- **Capture map (bottom).** Stage 4 takes the same `world_points` cloud, fits a floor plane to it, and rasterises above-floor density into a top-down PNG and JSON. CPU step, no model.
 
 The Next.js viewer fetches all three outputs and renders them as one orbitable scene with a labelled inventory and the top-down minimap. Long-form stage-by-stage notes in [`docs/PIPELINE.md`](docs/PIPELINE.md).
 
-### Design choices and novel decisions
+### Design choices
 
-The pipeline composes off-the-shelf components, but a handful of choices in each stage materially change the output. The full rationale, every alternative considered, and the failure mode that ruled it out lives in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) (~600 lines, 14 sections). What follows is one paragraph per stage.
+The pipeline composes off-the-shelf components. A handful of choices in each stage shape what the output looks like; the full rationale and the alternatives considered live in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) (~600 lines, 14 sections). One paragraph per stage follows.
 
-**Geometry.** FlashVGGT in a single forward pass beats chunked solves (which pin each chunk's first frame at the origin and produce N disjoint rooms), DUSt3R and MASt3R (pair-based, weak at long handheld sequences), and COLMAP-style SfM (slow, brittle on textureless walls and motion blur). VGGT-1B stays in the image as a transparent fallback for short clips and any case where the FlashVGGT build fails. The new piece worth flagging is a Laplacian-variance blur pre-filter that drops the worst 20 percent of frames before the pose head ever sees them. A single blurry frame can push the chunked-attention feature bank off by more than 30 degrees in rotation, which makes this the single highest-impact fix for handheld phone captures. See [`frame_select.py`](backend/src/spatiality/inference/frame_select.py) and [`DESIGN_DECISIONS.md §1–§2`](docs/DESIGN_DECISIONS.md).
+**Geometry.** FlashVGGT runs in a single forward pass over the whole sequence on an A100-80GB. Chunked solves pin each chunk's first frame at the origin and produce N disjoint rooms; DUSt3R and MASt3R are pair-based and weak on long handheld sequences; COLMAP-style SfM is slow and brittle on textureless walls and motion blur. VGGT-1B stays in the image as a fallback for short clips and any case where the FlashVGGT build fails. Before FlashVGGT, a Laplacian-variance pre-filter drops the worst 20 percent of frames by blur score, because a single blurry frame can push the chunked-attention feature bank off by more than 30 degrees in rotation. See [`frame_select.py`](backend/src/spatiality/inference/frame_select.py) and [`DESIGN_DECISIONS.md §1–§2`](docs/DESIGN_DECISIONS.md).
 
-**Semantics.** Two related new choices work together here. The first is a scoped Gemini scene scout: instead of running Grounding DINO against a fixed taxonomy or every possible noun, Gemini proposes noun phrases per temporal slice and GDINO fires those phrases only within their slice windows, with cross-phrase NMS at IoU 0.7 stopping two synonyms from forking the same object into parallel tracklets. That gives open-vocabulary recall without the false-positive deluge that querying for everything would produce. The second is the 3-D lift itself, which reads each pixel's xyz directly from VGGT's `world_points` tensor (so there is no manual unprojection step) and keeps a point only if it reprojects into at least 50 percent of other frames' SAM 2.1 masks. That filter is what kills the floor-bleed failure mode where unmasked floor pixels get pinned to whichever object is closest. SAM 3.1 video propagation was tried and dropped because it cost about ten minutes per scene for masks the lift did not end up consuming; SAM 2.1-hiera-tiny stays as a cheap single-frame mask inside the lift. See [`scene_scout.py`](backend/src/spatiality/segmentation/scene_scout.py), [`lift.py:380`](backend/src/spatiality/segmentation/lift.py), and [`DESIGN_DECISIONS.md §3–§6`](docs/DESIGN_DECISIONS.md).
+**Semantics.** A Gemini scene scout proposes noun phrases per temporal slice; Grounding DINO then fires those phrases only within their slice windows, with cross-phrase NMS at IoU 0.7 so two synonyms do not fork the same object into parallel tracklets. The 3-D lift reads each pixel's xyz directly from VGGT's `world_points` tensor (no manual `K⁻¹·depth·pixel` unprojection) and keeps a point only if it reprojects into at least 50 percent of other frames' SAM 2.1 masks. That reprojection check is what prevents unmasked floor pixels from being pinned to whichever object is closest. SAM 3.1 video propagation was tried and dropped because it cost about ten minutes per scene for masks the lift did not end up consuming; SAM 2.1-hiera-tiny stays as a single-frame mask inside the lift. See [`scene_scout.py`](backend/src/spatiality/segmentation/scene_scout.py), [`lift.py:571`](backend/src/spatiality/segmentation/lift.py), and [`DESIGN_DECISIONS.md §3–§6`](docs/DESIGN_DECISIONS.md).
 
-**Labelling.** Two passes of Gemini 2.5 Flash via PydanticAI. Lane B labels each track in isolation; Lane C reviews the whole scene at once and is allowed to relabel, drop, or merge tracks for coherence. Gemini Flash was chosen over Claude and OpenAI VLMs on multi-image latency and per-scene cost. The VLM is swappable via the `SPATIALITY_VLM_MODEL` environment variable, and `vlm.py` is the only file that knows the model id. The operational change worth flagging is that Lane B checkpoints per track rather than per stage: an earlier per-loop flush lost 24 labels to a single cancellation, so flushing immediately after every Gemini response means a cancellation now costs one missing track rather than the whole scene. See [`lane_b.py`](backend/src/spatiality/segmentation/lane_b.py) and [`DESIGN_DECISIONS.md §7–§11`](docs/DESIGN_DECISIONS.md).
+**Labelling.** Two passes of Gemini 2.5 Flash via PydanticAI. Lane B labels each track in isolation; Lane C then reviews the whole scene at once and is allowed to relabel, drop, or merge tracks for coherence. Gemini Flash was chosen over Claude and OpenAI VLMs on multi-image latency and per-scene cost. The VLM is swappable via the `SPATIALITY_VLM_MODEL` environment variable, resolved in [`vlm.py`](backend/src/spatiality/segmentation/vlm.py). Lane B writes a checkpoint after every Gemini response rather than at the end of the loop; an earlier per-loop flush lost 24 labels to a single cancellation, so per-track flushing means a cancellation now costs one missing track rather than the whole scene. See [`lane_b.py`](backend/src/spatiality/segmentation/lane_b.py) and [`DESIGN_DECISIONS.md §7–§11`](docs/DESIGN_DECISIONS.md).
 
-**Stage 4 capture map.** This stage intentionally uses no model. Floor extraction is robust statistics (the mode of the lower-percentile point heights after a histogram pass), and the top-down rasterisation is numpy and Pillow. The reframing is the interesting part. An earlier version of this stage was framed as a humanoid traversability and free-space map, but handheld captures rarely observe enough floor to support that inference honestly. Pivoting to "show what we actually saw" is the version every run can produce meaningfully, and it ships as both a JSON density grid and a PNG preview. See [`capture_map.py`](backend/src/spatiality/nav/capture_map.py) and [`DESIGN_DECISIONS.md §12`](docs/DESIGN_DECISIONS.md).
-
-**Philosophy.** Simple beats clever when simple works. Single forward beats chunking. Per-unit checkpointing beats per-stage flushes. VLMs are for labelling and judgement, never for geometry. See [`DESIGN_DECISIONS.md §0`](docs/DESIGN_DECISIONS.md).
+**Stage 4 capture map.** This stage uses no model. Floor extraction is robust statistics (the mode of the lower-percentile point heights after a histogram pass), and the top-down rasterisation is numpy and Pillow. An earlier version of this stage was framed as a humanoid traversability and free-space map, but handheld captures rarely observe enough floor to support that inference, so it was reframed to a density map of what the camera actually saw. Ships as a JSON density grid and a PNG preview. See [`capture_map.py`](backend/src/spatiality/nav/capture_map.py) and [`DESIGN_DECISIONS.md §12`](docs/DESIGN_DECISIONS.md).
 
 ### Tradeoffs
 
@@ -228,20 +226,20 @@ The pipeline composes off-the-shelf components, but a handful of choices in each
     </tr>
 </table>
 
-The three most user-visible costs (full list in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md)):
+The three most user-visible costs (the full list is in [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md)):
 
-- **The VLM mislabels confidently and often.** Gemini 2.5 Flash is given a 3×3 anchor grid plus orbital novel-view renders per track and asked to name what it sees. Real failures from `demo_piece`: a hard drive labelled "portable speaker", a headphone box also labelled "portable speaker", a glossy door reflection labelled "recessed light". Lane C catches cross-scene inconsistencies but not visually-plausible single-track wrongness. The single largest source of user-visible errors.
-- **Multi-view ≥ 50 % rule is a sledgehammer.** It cuts the floor-bleed failure mode, but it also drops legitimate object pixels glimpsed in only a handful of oblique frames. The 50 % is hand-tuned; the honest answer is a learned curve, not a step.
-- **Hardware floor.** FlashVGGT single-forward on 500 frames needs an A100-80GB. The base-VGGT fallback can run on smaller cards for short clips, but the long-sequence quality story doesn't survive the fallback.
+- **VLM mislabels.** Gemini 2.5 Flash is given a 3×3 anchor grid plus orbital novel-view renders per track and asked to name what it sees. Real failures from `demo_piece`: a hard drive labelled "portable speaker", a headphone box also labelled "portable speaker", a glossy door reflection labelled "recessed light". Lane C catches cross-scene inconsistencies but not visually-plausible single-track wrongness. This is the largest source of user-visible errors.
+- **Multi-view ≥ 50 % filter is blunt.** It reduces the floor-bleed failure mode but also drops legitimate object pixels glimpsed in only a handful of oblique frames. The 50 % threshold is hand-tuned rather than learned.
+- **Hardware floor.** FlashVGGT single-forward on 500 frames needs an A100-80GB. The base-VGGT fallback runs on smaller cards for short clips but does not match the long-sequence quality of the FlashVGGT path.
 
 ### Future work
 
-In ship order, if this were full-time:
+In rough order:
 
-- **Mask-conditioned VLM prompt + OBB dimensions.** Alpha-cut the background with the SAM mask and pass `"≈ 14 × 9 × 2 cm at 0.75 m height"` into the prompt — makes "portable speaker" geometrically impossible for a hard drive. Kills the largest user-visible failure mode.
-- **Calibration set + eval harness.** mAP / 3D-OBB IoU / pose RMS on hand-annotated scenes. Unlocks everything below; the only honest fix for "confident wrong label."
-- **Plane-constrained bundle adjust on top of VGGT.** Manhattan-world prior from detected floor/wall/ceiling planes refines VGGT extrinsics — expect 5–15 cm tighter centroids and a cleaner gravity vector for Stage 4.
-- **Open-source VLM swap.** [SmolVLM](https://huggingface.co/HuggingFaceTB/SmolVLM-Instruct) / [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL) / [LLaVA-OneVision](https://github.com/LLaVA-VL/LLaVA-NeXT) — drops cost to ~$0 and kills the closed-API dependency.
+- **Mask-conditioned VLM prompt with OBB dimensions.** Alpha-cut the background using the SAM mask and pass `"≈ 14 × 9 × 2 cm at 0.75 m height"` into the prompt, so a hard drive cannot be labelled "portable speaker" against the geometry. Addresses the VLM-mislabel tradeoff above.
+- **Calibration set and evaluation harness.** mAP, 3D-OBB IoU, and pose RMS on hand-annotated scenes. Needed to measure the "confident wrong label" rate, which is currently observational.
+- **Plane-constrained bundle adjust on top of VGGT.** A Manhattan-world prior from detected floor, wall, and ceiling planes refines VGGT extrinsics; expected effect is 5–15 cm tighter centroids and a cleaner gravity vector for Stage 4.
+- **Open-source VLM swap.** [SmolVLM](https://huggingface.co/HuggingFaceTB/SmolVLM-Instruct), [Qwen2-VL](https://github.com/QwenLM/Qwen2-VL), or [LLaVA-OneVision](https://github.com/LLaVA-VL/LLaVA-NeXT) would remove the closed-API dependency and lower the per-scene VLM cost.
 
 &nbsp;
 
@@ -261,7 +259,7 @@ The orchestrator's [`_PULL_SKIP_PREFIXES`](backend/main.py) skips pipeline-inter
 
 ## References
 
-The pipeline is built almost entirely on open-source components. Each entry below explains *what we use from it*, not just what it is.
+External components the pipeline depends on, and what each is used for.
 
 **Geometry**
 

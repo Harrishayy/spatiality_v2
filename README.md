@@ -14,10 +14,6 @@ Outputs: a **12–50 M-point coloured cloud** with per-frame OpenCV cameras, **~
 
 ## Evidence
 
-### ▶ [Live demo · spatiality-v2.vercel.app](https://spatiality-v2.vercel.app)
-
-_(might have a long loading duration as 50,000,000 points need to be loaded on web 🥲)_
-
 <table>
   <tr>
     <td align="center">
@@ -52,13 +48,9 @@ Full runtime + cost numbers in [Runtime and cost](#runtime-and-cost) below.
 
 ## Quickstart
 
-Three paths, in order of setup cost.
+Two paths, in order of setup cost.
 
-### 1. Hosted demo (one click)
-
-[spatiality-v2.vercel.app](https://spatiality-v2.vercel.app) opens on `/scenes/demo_piece` — no install, no GPU, no keys. The 1.3 GB scene streams from Cloudflare R2 via the `NEXT_PUBLIC_DEMO_CDN_URL` rewrite in [`web/next.config.mjs`](web/next.config.mjs); no demo data is committed to the repo.
-
-### 2. Pre-baked scene, locally (no GPU, no keys, ~5 min)
+### 1. Pre-baked scene, locally (no GPU, no keys, ~5 min)
 
 Same scene as the hosted demo, served locally at full PLY quality. Needs Python 3.12, [pnpm](https://pnpm.io/installation), and ~3 GB disk.
 
@@ -82,7 +74,7 @@ cd web && pnpm install && pnpm dev
 
 Open `http://localhost:5173/scenes/demo_piece`. The optional `demo_piece_inputs.zip` (≈ 1.5 GB) on the same [release](https://github.com/Harrishayy/spatiality_v2/releases/tag/demo-piece-v1) ships the raw `source.mp4` + 900 extracted frames if you want to inspect the input.
 
-### 3. Run on your own video
+### 2. Run on your own video
 
 Two execution paths: **Modal** (recommended; what I built against) or **local CUDA** (experimental, untested).
 
